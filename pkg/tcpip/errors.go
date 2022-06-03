@@ -579,4 +579,20 @@ func (*ErrMulticastInputCannotBeOutput) IgnoreStats() bool {
 }
 func (*ErrMulticastInputCannotBeOutput) String() string { return "output cannot contain input" }
 
+// ErrMulticastForwardingAlreadyEnabled indicates that multicast forwarding is
+// already enabled for a particular protocol.
+//
+// +stateify savable
+type ErrMulticastForwardingAlreadyEnabled struct{}
+
+func (*ErrMulticastForwardingAlreadyEnabled) isError() {}
+
+// IgnoreStats implements Error.
+func (*ErrMulticastForwardingAlreadyEnabled) IgnoreStats() bool {
+	return true
+}
+func (*ErrMulticastForwardingAlreadyEnabled) String() string {
+	return "multicast forwarding already enabled"
+}
+
 // LINT.ThenChange(../syserr/netstack.go)

@@ -231,13 +231,23 @@ func TestAddMulticastRoute(t *testing.T) {
 		otherNICID:    otherEndpointAddr,
 	}
 
+	type startMulticastForwarding int
+	const (
+		beforeInjectedPacket = iota
+		afterInjectedPacket
+	)
+
+	type pendingPacketOptions struct {
+		startMulticastForwarding startMulticastForwarding
+	}
+
 	tests := []struct {
 		name                   string
 		srcAddr, dstAddr       addrType
 		routeIncomingNICID     tcpip.NICID
 		routeOutgoingNICID     tcpip.NICID
 		omitOutgoingInterfaces bool
-		injectPendingPacket    bool
+		injectPendingPacket    *pendingPacketOptions
 		expectForward          bool
 		wantErr                tcpip.Error
 	}{
@@ -250,13 +260,26 @@ func TestAddMulticastRoute(t *testing.T) {
 			wantErr:            nil,
 		},
 		{
-			name:                "pending packet forwarded",
-			srcAddr:             remoteUnicastAddr,
-			dstAddr:             multicastAddr,
-			routeIncomingNICID:  incomingNICID,
-			routeOutgoingNICID:  outgoingNICID,
-			injectPendingPacket: true,
-			expectForward:       true,
+			name:               "pending packet forwarded",
+			srcAddr:            remoteUnicastAddr,
+			dstAddr:            multicastAddr,
+			routeIncomingNICID: incomingNICID,
+			routeOutgoingNICID: outgoingNICID,
+			injectPendingPacket: &pendingPacketOptions{
+				startMulticastForwarding: beforeInjectedPacket,
+			},
+			expectForward: true,
+		},
+		{
+			name:               "pending packet not queued when multicast forwarding disabled",
+			srcAddr:            remoteUnicastAddr,
+			dstAddr:            multicastAddr,
+			routeIncomingNICID: incomingNICID,
+			routeOutgoingNICID: outgoingNICID,
+			injectPendingPacket: &pendingPacketOptions{
+				startMulticastForwarding: afterInjectedPacket,
+			},
+			expectForward: false,
 		},
 		{
 			name:    "unexpected input interface",
@@ -264,9 +287,11 @@ func TestAddMulticastRoute(t *testing.T) {
 			dstAddr: multicastAddr,
 			// The added route's incoming NICID does not match the pending packet's
 			// incoming NICID. As a result, the packet should not be forwarded.
-			routeIncomingNICID:  otherNICID,
-			routeOutgoingNICID:  outgoingNICID,
-			injectPendingPacket: true,
+			routeIncomingNICID: otherNICID,
+			routeOutgoingNICID: outgoingNICID,
+			injectPendingPacket: &pendingPacketOptions{
+				startMulticastForwarding: beforeInjectedPacket,
+			},
 		},
 		{
 			name:               "multicast source",
@@ -393,7 +418,12 @@ func TestAddMulticastRoute(t *testing.T) {
 				srcAddr := getAddr(protocol, test.srcAddr)
 				dstAddr := getAddr(protocol, test.dstAddr)
 
-				if test.injectPendingPacket {
+				if test.injectPendingPacket != nil {
+					if test.injectPendingPacket.startMulticastForwarding == beforeInjectedPacket {
+						if err := s.EnableMulticastForwardingForProtocol(protocol); err != nil {
+							t.Fatalf("s.EnableMulticastForwardingForProtocol(%d): %s", protocol, err)
+						}
+					}
 					incomingEp, ok := endpoints[incomingNICID]
 					if !ok {
 						t.Fatalf("got endpoints[%d] = (_, false), want (_, true)", incomingNICID)
@@ -405,6 +435,11 @@ func TestAddMulticastRoute(t *testing.T) {
 					if p != nil {
 						// An ICMP error should never be sent in response to a multicast packet.
 						t.Fatalf("got incomingEp.Read() = %#v, want = nil", p)
+					}
+					if test.injectPendingPacket.startMulticastForwarding == afterInjectedPacket {
+						if err := s.EnableMulticastForwardingForProtocol(protocol); err != nil {
+							t.Fatalf("s.EnableMulticastForwardingForProtocol(%d): %s", protocol, err)
+						}
 					}
 				}
 
@@ -448,6 +483,28 @@ func TestAddMulticastRoute(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestEnableMulticastForwardingAlreadyEnabled(t *testing.T) {
+	for _, protocol := range []tcpip.NetworkProtocolNumber{ipv4.ProtocolNumber, ipv6.ProtocolNumber} {
+		t.Run(fmt.Sprintf("%d", protocol), func(t *testing.T) {
+			s := stack.New(stack.Options{
+				NetworkProtocols:   []stack.NetworkProtocolFactory{ipv4.NewProtocol, ipv6.NewProtocol},
+				TransportProtocols: []stack.TransportProtocolFactory{udp.NewProtocol},
+			})
+			defer s.Close()
+
+			if err := s.EnableMulticastForwardingForProtocol(protocol); err != nil {
+				t.Errorf("s.EnableMulticastForwardingForProtocol(%d) = %s, want = nil", protocol, err)
+			}
+
+			err := s.EnableMulticastForwardingForProtocol(protocol)
+			wantErr := &tcpip.ErrMulticastForwardingAlreadyEnabled{}
+			if !cmp.Equal(err, wantErr, cmpopts.EquateErrors()) {
+				t.Errorf("s.EnableMulticastForwardingForProtocol(%d) = %s, want = %s", protocol, err, wantErr)
+			}
+		})
 	}
 }
 
@@ -529,6 +586,10 @@ func TestMulticastRouteLastUsedTime(t *testing.T) {
 					Clock:              clock,
 				})
 				defer s.Close()
+
+				if err := s.EnableMulticastForwardingForProtocol(protocol); err != nil {
+					t.Fatalf("s.EnableMulticastForwardingForProtocol(%d): %s", protocol, err)
+				}
 
 				endpoints := make(map[tcpip.NICID]*channel.Endpoint)
 				for nicID, addrType := range endpointConfigs {
@@ -686,6 +747,10 @@ func TestRemoveMulticastRoute(t *testing.T) {
 				})
 				defer s.Close()
 
+				if err := s.EnableMulticastForwardingForProtocol(protocol); err != nil {
+					t.Fatalf("s.EnableMulticastForwardingForProtocol(%d): %s", protocol, err)
+				}
+
 				endpoints := make(map[tcpip.NICID]*channel.Endpoint)
 				for nicID, addrType := range endpointConfigs {
 					ep := channel.New(1, ipv4.MaxTotalSize, "")
@@ -791,16 +856,17 @@ func TestMulticastForwarding(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                                string
-		dstAddr                             addrType
-		ttl                                 uint8
-		routeInputInterface                 tcpip.NICID
-		disableMulticastForwarding          bool
-		removeOutputInterface               tcpip.NICID
-		expectMissingRouteEvent             bool
-		expectUnexpectedInputInterfaceEvent bool
-		joinMulticastGroup                  bool
-		expectedForwardingInterfaces        []tcpip.NICID
+		name                                 string
+		dstAddr                              addrType
+		ttl                                  uint8
+		routeInputInterface                  tcpip.NICID
+		disableMulticastForwardingForNIC     bool
+		updateMulticastForwardingForProtocol func(*testing.T, *stack.Stack, tcpip.NetworkProtocolNumber)
+		removeOutputInterface                tcpip.NICID
+		expectMissingRouteEvent              bool
+		expectUnexpectedInputInterfaceEvent  bool
+		joinMulticastGroup                   bool
+		expectedForwardingInterfaces         []tcpip.NICID
 	}{
 		{
 			name:                         "forward only",
@@ -826,11 +892,37 @@ func TestMulticastForwarding(t *testing.T) {
 			expectedForwardingInterfaces: []tcpip.NICID{},
 		},
 		{
-			name:                         "multicast forwarding disabled",
-			disableMulticastForwarding:   true,
-			dstAddr:                      multicastAddr,
+			name:                             "multicast forwarding disabled for NIC",
+			disableMulticastForwardingForNIC: true,
+			dstAddr:                          multicastAddr,
+			ttl:                              packetTTL,
+			routeInputInterface:              incomingNICID,
+			expectedForwardingInterfaces:     []tcpip.NICID{},
+		},
+		{
+			name:    "multicast forwarding disabled for protocol",
+			dstAddr: multicastAddr,
+			updateMulticastForwardingForProtocol: func(t *testing.T, s *stack.Stack, protocol tcpip.NetworkProtocolNumber) {
+				s.DisableMulticastForwardingForProtocol(protocol)
+			},
 			ttl:                          packetTTL,
 			routeInputInterface:          incomingNICID,
+			expectedForwardingInterfaces: []tcpip.NICID{},
+		},
+		{
+			name:    "route table cleared after multicast forwarding disabled for protocol",
+			dstAddr: multicastAddr,
+			updateMulticastForwardingForProtocol: func(t *testing.T, s *stack.Stack, protocol tcpip.NetworkProtocolNumber) {
+				t.Helper()
+
+				s.DisableMulticastForwardingForProtocol(protocol)
+				if err := s.EnableMulticastForwardingForProtocol(protocol); err != nil {
+					t.Fatalf("s.EnableMulticastForwardingForProtocol(%d): %s", protocol, err)
+				}
+			},
+			ttl:                          packetTTL,
+			routeInputInterface:          incomingNICID,
+			expectMissingRouteEvent:      true,
 			expectedForwardingInterfaces: []tcpip.NICID{},
 		},
 		{
@@ -900,6 +992,10 @@ func TestMulticastForwarding(t *testing.T) {
 				})
 				defer s.Close()
 
+				if err := s.EnableMulticastForwardingForProtocol(protocol); err != nil {
+					t.Fatalf("s.EnableMulticastForwardingForProtocol(%d): %s", protocol, err)
+				}
+
 				endpoints := make(map[tcpip.NICID]*channel.Endpoint)
 				for nicID, addrType := range endpointConfigs {
 					ep := channel.New(1, ipv4.MaxTotalSize, "")
@@ -916,7 +1012,7 @@ func TestMulticastForwarding(t *testing.T) {
 						t.Fatalf("s.AddProtocolAddress(%d, %+v, {}): %s", nicID, addr, err)
 					}
 
-					s.SetNICMulticastForwarding(nicID, protocol, !test.disableMulticastForwarding)
+					s.SetNICMulticastForwarding(nicID, protocol, !test.disableMulticastForwardingForNIC)
 					endpoints[nicID] = ep
 				}
 
@@ -943,6 +1039,10 @@ func TestMulticastForwarding(t *testing.T) {
 
 				if err := s.AddMulticastRoute(protocol, addresses, route); err != nil {
 					t.Fatalf("AddMulticastRoute(%d, %#v, %#v): %s", protocol, addresses, route, err)
+				}
+
+				if test.updateMulticastForwardingForProtocol != nil {
+					test.updateMulticastForwardingForProtocol(t, s, protocol)
 				}
 
 				if test.removeOutputInterface != 0 {

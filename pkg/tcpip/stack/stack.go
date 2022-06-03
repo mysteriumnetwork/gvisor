@@ -613,6 +613,43 @@ func (s *Stack) MulticastRouteLastUsedTime(protocol tcpip.NetworkProtocolNumber,
 	return forwardingNetProto.MulticastRouteLastUsedTime(addresses)
 }
 
+// EnableMulticastForwardingForProtocol enables multicast forwarding for the
+// provided protocol.
+//
+// Enabling multicast forwarding at the protocol level implies that the caller
+// is prepared to respond to multicast routing events for any NIC that has
+// multicast forwarding enabled.
+func (s *Stack) EnableMulticastForwardingForProtocol(protocol tcpip.NetworkProtocolNumber) tcpip.Error {
+	netProto, ok := s.networkProtocols[protocol]
+	if !ok {
+		return &tcpip.ErrUnknownProtocol{}
+	}
+
+	forwardingNetProto, ok := netProto.(MulticastForwardingNetworkProtocol)
+	if !ok {
+		return &tcpip.ErrNotSupported{}
+	}
+
+	return forwardingNetProto.EnableMulticastForwarding()
+}
+
+// DisableMulticastForwardingForProtocol disables multicast forwarding for the
+// provided protocol.
+func (s *Stack) DisableMulticastForwardingForProtocol(protocol tcpip.NetworkProtocolNumber) tcpip.Error {
+	netProto, ok := s.networkProtocols[protocol]
+	if !ok {
+		return &tcpip.ErrUnknownProtocol{}
+	}
+
+	forwardingNetProto, ok := netProto.(MulticastForwardingNetworkProtocol)
+	if !ok {
+		return &tcpip.ErrNotSupported{}
+	}
+
+	forwardingNetProto.DisableMulticastForwarding()
+	return nil
+}
+
 // SetNICMulticastForwarding enables or disables multicast packet forwarding on
 // the specified NIC for the passed protocol.
 //

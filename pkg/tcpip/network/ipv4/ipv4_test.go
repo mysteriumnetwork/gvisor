@@ -814,6 +814,10 @@ func TestMulticastFragmentForwarding(t *testing.T) {
 			defer ctx.cleanup()
 			s := ctx.s
 
+			if err := s.EnableMulticastForwardingForProtocol(ipv4.ProtocolNumber); err != nil {
+				t.Fatalf("s.EnableMulticastForwardingForProtocol(%d): %s", ipv4.ProtocolNumber, err)
+			}
+
 			endpoints := make(map[tcpip.NICID]*channel.Endpoint)
 			for nicID, addr := range defaultEndpointConfigs {
 				// For the input interface, we expect at most a single packet in
@@ -982,6 +986,10 @@ func TestMulticastForwardingOptions(t *testing.T) {
 			// Advance the clock by some unimportant amount to make
 			// it give a more recognisable signature than 00,00,00,00.
 			clock.Advance(time.Millisecond * randomTimeOffset)
+
+			if err := s.EnableMulticastForwardingForProtocol(ipv4.ProtocolNumber); err != nil {
+				t.Fatalf("s.EnableMulticastForwardingForProtocol(%d): %s", ipv4.ProtocolNumber, err)
+			}
 
 			endpoints := make(map[tcpip.NICID]*channel.Endpoint)
 			for nicID, addr := range defaultEndpointConfigs {

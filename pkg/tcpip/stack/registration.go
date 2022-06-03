@@ -817,6 +817,15 @@ type MulticastForwardingNetworkProtocol interface {
 	// Returns an error if the addresses are invalid or a matching route was not
 	// found.
 	MulticastRouteLastUsedTime(UnicastSourceAndMulticastDestination) (tcpip.MonotonicTime, tcpip.Error)
+
+	// EnableMulticastForwarding enables multicast forwarding for the protocol.
+	//
+	// Returns an error if multicast forwarding is already enabled for the
+	// protocol.
+	EnableMulticastForwarding() tcpip.Error
+
+	// DisableMulticastForwarding disables multicast forwarding for the protocol.
+	DisableMulticastForwarding()
 }
 
 // MulticastPacketContext is the context in which a multicast packet triggered

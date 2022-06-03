@@ -1047,7 +1047,7 @@ func (e *endpoint) handleValidatedPacket(h header.IPv4, pkt *stack.PacketBuffer,
 		// RFC 1812 section 5.2.3 for details regarding the forwarding/local
 		// delivery decision.
 
-		multicastForwarding := e.MulticastForwarding()
+		multicastForwarding := e.MulticastForwarding() && e.protocol.multicastForwarding()
 
 		if multicastForwarding {
 			e.handleForwardingError(e.forwardMulticastPacket(h, pkt))
@@ -1432,7 +1432,8 @@ type protocol struct {
 
 	options Options
 
-	multicastRouteTable multicast.RouteTable
+	multicastForwardingEnabled atomicbitops.Uint32
+	multicastRouteTable        multicast.RouteTable
 }
 
 // Number returns the ipv4 protocol number.
@@ -1558,6 +1559,28 @@ func (p *protocol) RemoveMulticastRoute(addresses stack.UnicastSourceAndMulticas
 	}
 
 	return nil
+}
+
+// EnableMulticastForwarding implements
+// stack.MulticastForwardingNetworkProtocol.EnableMulticastForwarding.
+func (p *protocol) EnableMulticastForwarding() tcpip.Error {
+	if p.multicastForwarding() {
+		return &tcpip.ErrMulticastForwardingAlreadyEnabled{}
+	}
+
+	p.multicastForwardingEnabled.Swap(forwardingEnabled)
+	return nil
+}
+
+// DisableMulticastForwarding implements
+// stack.MulticastForwardingNetworkProtocol.DisableMulticastForwarding.
+func (p *protocol) DisableMulticastForwarding() {
+	p.multicastForwardingEnabled.Swap(forwardingDisabled)
+	p.multicastRouteTable.RemoveAllInstalledRoutes()
+}
+
+func (p *protocol) multicastForwarding() bool {
+	return p.multicastForwardingEnabled.Load() == forwardingEnabled
 }
 
 // MulticastRouteLastUsedTime implements

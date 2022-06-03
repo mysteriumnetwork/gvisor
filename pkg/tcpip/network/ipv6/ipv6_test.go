@@ -3440,6 +3440,10 @@ func TestMulticastForwarding(t *testing.T) {
 			defer c.cleanup()
 			s := c.s
 
+			if err := s.EnableMulticastForwardingForProtocol(ProtocolNumber); err != nil {
+				t.Fatalf("s.EnableMulticastForwardingForProtocol(%d): %s", ProtocolNumber, err)
+			}
+
 			endpoints := make(map[tcpip.NICID]*channel.Endpoint)
 			for nicID, addr := range defaultEndpointConfigs {
 				ep := channel.New(1, header.IPv6MinimumMTU, "")

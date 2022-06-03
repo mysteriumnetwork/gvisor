@@ -329,6 +329,17 @@ func (f *fakeNetworkProtocol) MulticastRouteLastUsedTime(addresses stack.Unicast
 	return tcpip.MonotonicTime{}, nil
 }
 
+// EnableMulticastForwarding implements
+// MulticastForwardingNetworkProtocol.EnableMulticastForwarding.
+func (f *fakeNetworkProtocol) EnableMulticastForwarding() tcpip.Error {
+	return nil
+}
+
+// DisableMulticastForwarding implements
+// MulticastForwardingNetworkProtocol.DisableMulticastForwarding.
+func (f *fakeNetworkProtocol) DisableMulticastForwarding() {
+}
+
 // Forwarding implements stack.ForwardingNetworkEndpoint.
 func (f *fakeNetworkEndpoint) Forwarding() bool {
 	f.mu.RLock()
@@ -4855,6 +4866,88 @@ func TestMulticastRouteLastUsedTime(t *testing.T) {
 				if !cmp.Equal(fakeNet.multicastRouteLastUsedTimeData, addresses) {
 					t.Errorf("fakeNet.multicastRouteLastUsedTimeData = %#v, want = %#v", fakeNet.multicastRouteLastUsedTimeData, addresses)
 				}
+			}
+		})
+	}
+}
+
+func TestEnableMulticastForwarding(t *testing.T) {
+	tests := []struct {
+		name     string
+		netProto tcpip.NetworkProtocolNumber
+		factory  stack.NetworkProtocolFactory
+		wantErr  tcpip.Error
+	}{
+		{
+			name:     "valid",
+			netProto: fakeNetNumber,
+			factory:  fakeNetFactory,
+			wantErr:  nil,
+		},
+		{
+			name:     "unknown protocol",
+			factory:  fakeNetFactory,
+			netProto: arp.ProtocolNumber,
+			wantErr:  &tcpip.ErrUnknownProtocol{},
+		},
+		{
+			name:     "not supported",
+			factory:  arp.NewProtocol,
+			netProto: arp.ProtocolNumber,
+			wantErr:  &tcpip.ErrNotSupported{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := stack.New(stack.Options{
+				NetworkProtocols: []stack.NetworkProtocolFactory{test.factory},
+			})
+
+			err := s.EnableMulticastForwardingForProtocol(test.netProto)
+
+			if !cmp.Equal(err, test.wantErr, cmpopts.EquateErrors()) {
+				t.Errorf("s.EnableMulticastForwardingForProtocol(%d) = %s, want = %s", test.netProto, err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestDisableMulticastForwarding(t *testing.T) {
+	tests := []struct {
+		name     string
+		netProto tcpip.NetworkProtocolNumber
+		factory  stack.NetworkProtocolFactory
+		wantErr  tcpip.Error
+	}{
+		{
+			name:     "valid",
+			netProto: fakeNetNumber,
+			factory:  fakeNetFactory,
+			wantErr:  nil,
+		},
+		{
+			name:     "unknown protocol",
+			factory:  fakeNetFactory,
+			netProto: arp.ProtocolNumber,
+			wantErr:  &tcpip.ErrUnknownProtocol{},
+		},
+		{
+			name:     "not supported",
+			factory:  arp.NewProtocol,
+			netProto: arp.ProtocolNumber,
+			wantErr:  &tcpip.ErrNotSupported{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := stack.New(stack.Options{
+				NetworkProtocols: []stack.NetworkProtocolFactory{test.factory},
+			})
+
+			err := s.DisableMulticastForwardingForProtocol(test.netProto)
+
+			if !cmp.Equal(err, test.wantErr, cmpopts.EquateErrors()) {
+				t.Errorf("s.DisableMulticastForwardingForProtocol(%d) = %s, want = %s", test.netProto, err, test.wantErr)
 			}
 		})
 	}
