@@ -276,6 +276,13 @@ func (fs *filesystem) getChildAndWalkPathLocked(ctx context.Context, parent *den
 		return child, nil
 	}
 
+	if parent.childrenSet != nil {
+		// Is the first child even there? Don't make RPC if not.
+		if _, ok := parent.childrenSet[first]; !ok {
+			return nil, linuxerr.ENOENT
+		}
+	}
+
 	// Walk as much of the path as possible in 1 RPC.
 	names := []string{first}
 	for pit = pit.Next(); pit.Ok(); pit = pit.Next() {
@@ -367,6 +374,13 @@ func (fs *filesystem) getChildLocked(ctx context.Context, parent *dentry, name s
 			return nil, linuxerr.ENOENT
 		}
 		return child, nil
+	}
+
+	if parent.childrenSet != nil {
+		// Is the child even there? Don't make RPC if not.
+		if _, ok := parent.childrenSet[name]; !ok {
+			return nil, linuxerr.ENOENT
+		}
 	}
 
 	var child *dentry
@@ -549,7 +563,7 @@ func (fs *filesystem) doCreateAt(ctx context.Context, rp *vfs.ResolvingPath, dir
 			return err
 		}
 		parent.touchCMtime()
-		parent.dirents = nil
+		parent.clearDirentsLocked()
 		ev := linux.IN_CREATE
 		if dir {
 			ev |= linux.IN_ISDIR
@@ -569,7 +583,7 @@ func (fs *filesystem) doCreateAt(ctx context.Context, rp *vfs.ResolvingPath, dir
 			delete(parent.children, name)
 		}
 		parent.touchCMtime()
-		parent.dirents = nil
+		parent.clearDirentsLocked()
 	}
 	ev := linux.IN_CREATE
 	if dir {
@@ -745,7 +759,7 @@ func (fs *filesystem) unlinkAt(ctx context.Context, rp *vfs.ResolvingPath, dir b
 	}
 	parent.cacheNegativeLookupLocked(name)
 	if parent.cachedMetadataAuthoritative() {
-		parent.dirents = nil
+		parent.clearDirentsLocked()
 		parent.touchCMtime()
 		if dir {
 			parent.decLinks()
@@ -1391,7 +1405,7 @@ func (d *dentry) createAndOpenChildLocked(ctx context.Context, rp *vfs.Resolving
 	appendNewChildDentry(ds, d, child)
 	if d.cachedMetadataAuthoritative() {
 		d.touchCMtime()
-		d.dirents = nil
+		d.clearDirentsLocked()
 	}
 
 	// Finally, construct a file description representing the created file.
@@ -1623,14 +1637,14 @@ func (fs *filesystem) RenameAt(ctx context.Context, rp *vfs.ResolvingPath, oldPa
 		renamed.touchCtime()
 	}
 	if oldParent.cachedMetadataAuthoritative() {
-		oldParent.dirents = nil
+		oldParent.clearDirentsLocked()
 		oldParent.touchCMtime()
 		if renamed.isDir() {
 			oldParent.decLinks()
 		}
 	}
 	if newParent.cachedMetadataAuthoritative() {
-		newParent.dirents = nil
+		newParent.clearDirentsLocked()
 		newParent.touchCMtime()
 		if renamed.isDir() && (replaced == nil || !replaced.isDir()) {
 			// Increase the link count if we did not replace another directory.
