@@ -71,6 +71,80 @@ func init() {
 	addSyscallPoint(157, "setsid", nil)
 	addSyscallPoint(147, "setresuid", nil)
 	addSyscallPoint(149, "setresgid", nil)
+	addSyscallPoint(261, "prlimit64", nil)
+	addSyscallPoint(51, "chroot", nil)
+	addSyscallPoint(23, "dup", []FieldDesc{
+		{
+			ID:   FieldSyscallPath,
+			Name: "fd_path",
+		},
+	})
+	addSyscallPoint(24, "dup3", []FieldDesc{
+		{
+			ID:   FieldSyscallPath,
+			Name: "fd_path",
+		},
+	})
+	addSyscallPoint(59, "pipe2", nil)
+	addSyscallPoint(74, "signalfd4", []FieldDesc{
+		{
+			ID:   FieldSyscallPath,
+			Name: "fd_path",
+		},
+	})
+	addSyscallPoint(25, "fcntl", []FieldDesc{
+		{
+			ID:   FieldSyscallPath,
+			Name: "fd_path",
+		},
+	})
+	addSyscallPoint(19, "eventfd2", nil)
+	addSyscallPoint(220, "clone", nil)
+	addSyscallPoint(200, "bind", []FieldDesc{
+		{
+			ID:   FieldSyscallPath,
+			Name: "fd_path",
+		},
+	})
+	addSyscallPoint(202, "accept", []FieldDesc{
+		{
+			ID:   FieldSyscallPath,
+			Name: "fd_path",
+		},
+	})
+	addSyscallPoint(242, "accept4", []FieldDesc{
+		{
+			ID:   FieldSyscallPath,
+			Name: "fd_path",
+		},
+	})
+	addSyscallPoint(26, "inotify_init1", nil)
+	addSyscallPoint(27, "inotify_add_watch", []FieldDesc{
+		{
+			ID:   FieldSyscallPath,
+			Name: "fd_path",
+		},
+	})
+	addSyscallPoint(28, "inotify_rm_watch", []FieldDesc{
+		{
+			ID:   FieldSyscallPath,
+			Name: "fd_path",
+		},
+	})
+	addSyscallPoint(85, "timerfd_create", nil)
+	addSyscallPoint(86, "timerfd_settime", []FieldDesc{
+		{
+			ID:   FieldSyscallPath,
+			Name: "fd_path",
+		},
+	})
+	addSyscallPoint(87, "timerfd_gettime", []FieldDesc{
+		{
+			ID:   FieldSyscallPath,
+			Name: "fd_path",
+		},
+	})
+	addSyscallPoint(199, "socketpair", nil)
 
 	const lastSyscallInTable = 441
 	for i := 0; i <= lastSyscallInTable; i++ {
