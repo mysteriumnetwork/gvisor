@@ -616,6 +616,9 @@ afterTrailingSymlink:
 	if err := child.inode.CheckPermissions(ctx, rp.Credentials(), ats); err != nil {
 		return nil, err
 	}
+	if rp.MustBeDir() && !child.isDir() {
+		return nil, linuxerr.ENOTDIR
+	}
 	// Open may block so we need to unlock fs.mu. IncRef child to prevent
 	// its destruction while fs.mu is unlocked.
 	child.IncRef()
