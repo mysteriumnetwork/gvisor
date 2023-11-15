@@ -1,4 +1,4 @@
-module gvisor.dev/gvisor
+module github.com/mysteriumnetwork/gvisor
 
 go 1.18
 
