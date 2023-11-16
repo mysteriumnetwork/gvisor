@@ -1,4 +1,4 @@
-// Copyright 2020 The gVisor Authors.
+// Copyright 2023 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,22 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build race && amd64
-// +build race,amd64
+//go:build amd64
+// +build amd64
 
 #include "textflag.h"
 
-// func RaceUncheckedAtomicCompareAndSwapUintptr(ptr *uintptr, old, new uintptr) bool
-TEXT ·RaceUncheckedAtomicCompareAndSwapUintptr(SB),NOSPLIT|NOFRAME,$0-25
-	MOVQ ptr+0(FP), DI
-	MOVQ old+8(FP), AX
-	MOVQ new+16(FP), SI
-
-	LOCK
-	CMPXCHGQ SI, 0(DI)
-
-	SETEQ AX
-	MOVB AX, ret+24(FP)
-
+// func MemoryFenceReads()
+TEXT ·MemoryFenceReads(SB),NOSPLIT|NOFRAME,$0-0
+	// No memory fence is required on x86. However, a compiler fence is
+	// required to prevent the compiler from reordering memory accesses. The Go
+	// compiler will not reorder memory accesses around a call to an assembly
+	// function; compare runtime.publicationBarrier.
 	RET
-
