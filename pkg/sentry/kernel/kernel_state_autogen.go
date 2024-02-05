@@ -3,7 +3,6 @@
 package kernel
 
 import (
-	"gvisor.dev/gvisor/pkg/bpf"
 	"gvisor.dev/gvisor/pkg/state"
 	"gvisor.dev/gvisor/pkg/tcpip"
 )
@@ -346,6 +345,37 @@ func (uc *UserCounters) StateLoad(stateSourceObject state.Source) {
 	stateSourceObject.Load(1, &uc.rlimitNProc)
 }
 
+func (c *CgroupMount) StateTypeName() string {
+	return "pkg/sentry/kernel.CgroupMount"
+}
+
+func (c *CgroupMount) StateFields() []string {
+	return []string{
+		"Fs",
+		"Root",
+		"Mount",
+	}
+}
+
+func (c *CgroupMount) beforeSave() {}
+
+// +checklocksignore
+func (c *CgroupMount) StateSave(stateSinkObject state.Sink) {
+	c.beforeSave()
+	stateSinkObject.Save(0, &c.Fs)
+	stateSinkObject.Save(1, &c.Root)
+	stateSinkObject.Save(2, &c.Mount)
+}
+
+func (c *CgroupMount) afterLoad() {}
+
+// +checklocksignore
+func (c *CgroupMount) StateLoad(stateSourceObject state.Source) {
+	stateSourceObject.Load(0, &c.Fs)
+	stateSourceObject.Load(1, &c.Root)
+	stateSourceObject.Load(2, &c.Mount)
+}
+
 func (k *Kernel) StateTypeName() string {
 	return "pkg/sentry/kernel.Kernel"
 }
@@ -387,6 +417,7 @@ func (k *Kernel) StateFields() []string {
 		"ptraceExceptions",
 		"YAMAPtraceScope",
 		"cgroupRegistry",
+		"cgroupMountsMap",
 		"userCountersMap",
 		"MaxFDLimit",
 	}
@@ -434,8 +465,9 @@ func (k *Kernel) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(32, &k.ptraceExceptions)
 	stateSinkObject.Save(33, &k.YAMAPtraceScope)
 	stateSinkObject.Save(34, &k.cgroupRegistry)
-	stateSinkObject.Save(35, &k.userCountersMap)
-	stateSinkObject.Save(36, &k.MaxFDLimit)
+	stateSinkObject.Save(35, &k.cgroupMountsMap)
+	stateSinkObject.Save(36, &k.userCountersMap)
+	stateSinkObject.Save(37, &k.MaxFDLimit)
 }
 
 func (k *Kernel) afterLoad() {}
@@ -476,9 +508,35 @@ func (k *Kernel) StateLoad(stateSourceObject state.Source) {
 	stateSourceObject.Load(32, &k.ptraceExceptions)
 	stateSourceObject.Load(33, &k.YAMAPtraceScope)
 	stateSourceObject.Load(34, &k.cgroupRegistry)
-	stateSourceObject.Load(35, &k.userCountersMap)
-	stateSourceObject.Load(36, &k.MaxFDLimit)
+	stateSourceObject.Load(35, &k.cgroupMountsMap)
+	stateSourceObject.Load(36, &k.userCountersMap)
+	stateSourceObject.Load(37, &k.MaxFDLimit)
 	stateSourceObject.LoadValue(20, new([]tcpip.Endpoint), func(y any) { k.loadDanglingEndpoints(y.([]tcpip.Endpoint)) })
+}
+
+func (p *privateMemoryFileMetadata) StateTypeName() string {
+	return "pkg/sentry/kernel.privateMemoryFileMetadata"
+}
+
+func (p *privateMemoryFileMetadata) StateFields() []string {
+	return []string{
+		"owners",
+	}
+}
+
+func (p *privateMemoryFileMetadata) beforeSave() {}
+
+// +checklocksignore
+func (p *privateMemoryFileMetadata) StateSave(stateSinkObject state.Sink) {
+	p.beforeSave()
+	stateSinkObject.Save(0, &p.owners)
+}
+
+func (p *privateMemoryFileMetadata) afterLoad() {}
+
+// +checklocksignore
+func (p *privateMemoryFileMetadata) StateLoad(stateSourceObject state.Source) {
+	stateSourceObject.Load(0, &p.owners)
 }
 
 func (s *SocketRecord) StateTypeName() string {
@@ -919,6 +977,37 @@ func (o *OldRSeqCriticalRegion) StateLoad(stateSourceObject state.Source) {
 	stateSourceObject.Load(1, &o.Restart)
 }
 
+func (ts *taskSeccomp) StateTypeName() string {
+	return "pkg/sentry/kernel.taskSeccomp"
+}
+
+func (ts *taskSeccomp) StateFields() []string {
+	return []string{
+		"filters",
+		"cache",
+		"cacheAuditNumber",
+	}
+}
+
+func (ts *taskSeccomp) beforeSave() {}
+
+// +checklocksignore
+func (ts *taskSeccomp) StateSave(stateSinkObject state.Sink) {
+	ts.beforeSave()
+	stateSinkObject.Save(0, &ts.filters)
+	stateSinkObject.Save(1, &ts.cache)
+	stateSinkObject.Save(2, &ts.cacheAuditNumber)
+}
+
+func (ts *taskSeccomp) afterLoad() {}
+
+// +checklocksignore
+func (ts *taskSeccomp) StateLoad(stateSourceObject state.Source) {
+	stateSourceObject.Load(0, &ts.filters)
+	stateSourceObject.Load(1, &ts.cache)
+	stateSourceObject.Load(2, &ts.cacheAuditNumber)
+}
+
 func (l *sessionList) StateTypeName() string {
 	return "pkg/sentry/kernel.sessionList"
 }
@@ -1211,7 +1300,7 @@ func (t *Task) StateFields() []string {
 		"ipcns",
 		"mountNamespace",
 		"parentDeathSignal",
-		"syscallFilters",
+		"seccomp",
 		"cleartid",
 		"allowedCPUMask",
 		"cpu",
@@ -1241,9 +1330,9 @@ func (t *Task) StateSave(stateSinkObject state.Sink) {
 	var ptraceTracerValue *Task
 	ptraceTracerValue = t.savePtraceTracer()
 	stateSinkObject.SaveValue(32, ptraceTracerValue)
-	var syscallFiltersValue []bpf.Program
-	syscallFiltersValue = t.saveSyscallFilters()
-	stateSinkObject.SaveValue(48, syscallFiltersValue)
+	var seccompValue *taskSeccomp
+	seccompValue = t.saveSeccomp()
+	stateSinkObject.SaveValue(48, seccompValue)
 	stateSinkObject.Save(0, &t.taskNode)
 	stateSinkObject.Save(1, &t.runState)
 	stateSinkObject.Save(2, &t.taskWorkCount)
@@ -1379,7 +1468,7 @@ func (t *Task) StateLoad(stateSourceObject state.Source) {
 	stateSourceObject.Load(65, &t.userCounters)
 	stateSourceObject.Load(66, &t.sessionKeyring)
 	stateSourceObject.LoadValue(32, new(*Task), func(y any) { t.loadPtraceTracer(y.(*Task)) })
-	stateSourceObject.LoadValue(48, new([]bpf.Program), func(y any) { t.loadSyscallFilters(y.([]bpf.Program)) })
+	stateSourceObject.LoadValue(48, new(*taskSeccomp), func(y any) { t.loadSeccomp(y.(*taskSeccomp)) })
 	stateSourceObject.AfterLoad(t.afterLoad)
 }
 
@@ -2421,7 +2510,9 @@ func init() {
 	state.Register((*FSContextRefs)(nil))
 	state.Register((*IPCNamespace)(nil))
 	state.Register((*UserCounters)(nil))
+	state.Register((*CgroupMount)(nil))
 	state.Register((*Kernel)(nil))
+	state.Register((*privateMemoryFileMetadata)(nil))
 	state.Register((*SocketRecord)(nil))
 	state.Register((*pendingSignals)(nil))
 	state.Register((*pendingSignalQueue)(nil))
@@ -2436,6 +2527,7 @@ func init() {
 	state.Register((*ptraceOptions)(nil))
 	state.Register((*ptraceStop)(nil))
 	state.Register((*OldRSeqCriticalRegion)(nil))
+	state.Register((*taskSeccomp)(nil))
 	state.Register((*sessionList)(nil))
 	state.Register((*sessionEntry)(nil))
 	state.Register((*SessionRefs)(nil))

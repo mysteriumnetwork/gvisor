@@ -113,6 +113,18 @@ type FDBasedLink struct {
 	NumChannels int
 }
 
+// BindOpt indicates whether the sentry or runsc process is responsible for
+// binding the AF_XDP socket.
+type BindOpt int
+
+const (
+	// BindSentry indicates the sentry process must call bind.
+	BindSentry BindOpt = iota
+
+	// BindRunsc indicates the runsc process must call bind.
+	BindRunsc
+)
+
 // XDPLink configures an XDP link.
 type XDPLink struct {
 	Name              string
@@ -126,6 +138,7 @@ type XDPLink struct {
 	QDisc             config.QueueingDiscipline
 	Neighbors         []Neighbor
 	GvisorGROTimeout  time.Duration
+	Bind              BindOpt
 
 	// NumChannels controls how many underlying FDs are to be used to
 	// create this endpoint.
@@ -202,8 +215,18 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 	for _, l := range args.FDBasedLinks {
 		wantFDs += l.NumChannels
 	}
-	if len(args.XDPLinks) > 0 {
-		wantFDs += 4
+	for _, link := range args.XDPLinks {
+		// We have to keep several FDs alive when the sentry is
+		// responsible for binding, but when runsc binds we only expect
+		// the AF_XDP socket itself.
+		switch v := link.Bind; v {
+		case BindSentry:
+			wantFDs += 4
+		case BindRunsc:
+			wantFDs++
+		default:
+			return fmt.Errorf("unknown bind value: %d", v)
+		}
 	}
 	if args.PCAP {
 		wantFDs++
@@ -297,7 +320,21 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 			}
 
 			// Wrap linkEP in a sniffer to enable packet logging.
-			sniffEP := sniffer.New(packetsocket.New(linkEP))
+			var sniffEP stack.LinkEndpoint
+			if args.PCAP {
+				newFD, err := unix.Dup(int(args.FilePayload.Files[fdOffset].Fd()))
+				if err != nil {
+					return fmt.Errorf("failed to dup pcap FD: %v", err)
+				}
+				const packetTruncateSize = 4096
+				sniffEP, err = sniffer.NewWithWriter(packetsocket.New(linkEP), os.NewFile(uintptr(newFD), "pcap-file"), packetTruncateSize)
+				if err != nil {
+					return fmt.Errorf("failed to create PCAP logger: %v", err)
+				}
+				fdOffset++
+			} else {
+				sniffEP = sniffer.New(packetsocket.New(linkEP))
+			}
 
 			var qDisc stack.QueueingDiscipline
 			switch link.QDisc {
@@ -347,16 +384,18 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 		}
 		fdOffset++
 
-		// The parent process sends several other FDs in order
-		// to keep them open and alive. These are for BPF
-		// programs and maps that, if closed, will break the
-		// dispatcher.
-		for _, fdName := range []string{"program-fd", "sockmap-fd", "link-fd"} {
-			oldFD := args.FilePayload.Files[fdOffset].Fd()
-			if _, err := unix.Dup(int(oldFD)); err != nil {
-				return fmt.Errorf("failed to dup %s with FD %d: %v", fdName, oldFD, err)
+		// When the sentry is responsible for binding, the runsc
+		// process sends several other FDs in order to keep them open
+		// and alive. These are for BPF programs and maps that, if
+		// closed, will break the dispatcher.
+		if link.Bind == BindSentry {
+			for _, fdName := range []string{"program-fd", "sockmap-fd", "link-fd"} {
+				oldFD := args.FilePayload.Files[fdOffset].Fd()
+				if _, err := unix.Dup(int(oldFD)); err != nil {
+					return fmt.Errorf("failed to dup %s with FD %d: %v", fdName, oldFD, err)
+				}
+				fdOffset++
 			}
-			fdOffset++
 		}
 
 		mac := tcpip.LinkAddress(link.LinkAddress)
@@ -366,6 +405,7 @@ func (n *Network) CreateLinksAndRoutes(args *CreateLinksAndRoutesArgs, _ *struct
 			TXChecksumOffload: link.TXChecksumOffload,
 			RXChecksumOffload: link.RXChecksumOffload,
 			InterfaceIndex:    link.InterfaceIndex,
+			Bind:              link.Bind == BindSentry,
 		})
 		if err != nil {
 			return err

@@ -48,6 +48,9 @@ const (
 	CgroupControllerPIDs    = CgroupControllerType("pids")
 )
 
+// CgroupCtrls is the list of cgroup controllers.
+var CgroupCtrls = []CgroupControllerType{"cpu", "cpuacct", "cpuset", "devices", "job", "memory", "pids"}
+
 // ParseCgroupController parses a string as a CgroupControllerType.
 func ParseCgroupController(val string) (CgroupControllerType, error) {
 	switch val {
@@ -401,6 +404,7 @@ func (r *CgroupRegistry) FindCgroup(ctx context.Context, ctype CgroupControllerT
 	if vfsfs == nil {
 		return Cgroup{}, fmt.Errorf("controller not active")
 	}
+	defer vfsfs.DecRef(ctx)
 
 	rootCG := vfsfs.Impl().(cgroupFS).RootCgroup()
 

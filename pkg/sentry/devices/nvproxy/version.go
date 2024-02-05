@@ -71,25 +71,25 @@ func (v DriverVersion) Equals(other DriverVersion) bool {
 	return v.major == other.major && v.minor == other.minor && v.patch == other.patch
 }
 
-// IsGreaterThan returns the "greater" driver version.
-// IsGreaterThan returns true if v is more recent than other, assuming v and other are on the same
+// isGreaterThan returns true if v is greater than other.
+// isGreaterThan returns true if v is more recent than other, assuming v and other are on the same
 // dev branch.
-func (v DriverVersion) IsGreaterThan(other DriverVersion) DriverVersion {
+func (v DriverVersion) isGreaterThan(other DriverVersion) bool {
 	switch {
 	case v.major > other.major:
-		return v
+		return true
 	case other.major > v.major:
-		return other
+		return false
 	case v.minor > other.minor:
-		return v
+		return true
 	case other.minor > v.minor:
-		return other
+		return false
 	case v.patch > other.patch:
-		return v
+		return true
 	case other.patch > v.patch:
-		return other
+		return false
 	default:
-		return v
+		return true
 	}
 }
 
@@ -138,7 +138,7 @@ var abisOnce sync.Once
 // Note: runfileChecksum is the checksum of the .run file of the driver installer for linux from
 // nvidia.
 // To add a new version, add in support as normal and add the "addDriverABI" call for your version.
-// Run `make sudo TARGETS=//tools/gpu:main ARGS="checksum"` and fill in mismatches.
+// Run `make sudo TARGETS=//tools/gpu:main ARGS="checksum --version={}"` to get checksum.
 func addDriverABI(major, minor, patch int, runfileChecksum string, cons driverABIFunc) driverABIFunc {
 	if abis == nil {
 		abis = make(map[DriverVersion]abiConAndChecksum)
@@ -236,6 +236,8 @@ func Init() {
 					nvgpu.NV2080_CTRL_CMD_GPU_GET_GID_INFO:                                 rmControlSimple,
 					nvgpu.NV2080_CTRL_CMD_GPU_GET_ENGINES_V2:                               rmControlSimple,
 					nvgpu.NV2080_CTRL_CMD_GPU_GET_ACTIVE_PARTITION_IDS:                     rmControlSimple,
+					nvgpu.NV2080_CTRL_CMD_GPU_GET_PIDS:                                     rmControlSimple,
+					nvgpu.NV2080_CTRL_CMD_GPU_GET_PID_INFO:                                 rmControlSimple,
 					nvgpu.NV2080_CTRL_CMD_GPU_GET_COMPUTE_POLICY_CONFIG:                    rmControlSimple,
 					nvgpu.NV2080_CTRL_CMD_GET_GPU_FABRIC_PROBE_INFO:                        rmControlSimple,
 					nvgpu.NV2080_CTRL_CMD_GR_SET_CTXSW_PREEMPTION_MODE:                     rmControlSimple,
@@ -247,6 +249,7 @@ func Init() {
 					nvgpu.NV2080_CTRL_CMD_GSP_GET_FEATURES:                                 rmControlSimple,
 					nvgpu.NV2080_CTRL_CMD_MC_GET_ARCH_INFO:                                 rmControlSimple,
 					nvgpu.NV2080_CTRL_CMD_MC_SERVICE_INTERRUPTS:                            rmControlSimple,
+					nvgpu.NV2080_CTRL_CMD_NVLINK_GET_NVLINK_CAPS:                           rmControlSimple,
 					nvgpu.NV2080_CTRL_CMD_NVLINK_GET_NVLINK_STATUS:                         rmControlSimple,
 					nvgpu.NV2080_CTRL_CMD_PERF_BOOST:                                       rmControlSimple,
 					nvgpu.NV2080_CTRL_CMD_RC_GET_WATCHDOG_INFO:                             rmControlSimple,
@@ -266,8 +269,10 @@ func Init() {
 					nvgpu.NVA06C_CTRL_CMD_GPFIFO_SCHEDULE:                                  rmControlSimple,
 					nvgpu.NVA06C_CTRL_CMD_SET_TIMESLICE:                                    rmControlSimple,
 					nvgpu.NVA06C_CTRL_CMD_PREEMPT:                                          rmControlSimple,
+					nvgpu.NVA06F_CTRL_CMD_GPFIFO_SCHEDULE:                                  rmControlSimple,
 					nvgpu.NV0000_CTRL_CMD_SYSTEM_GET_BUILD_VERSION:                         ctrlClientSystemGetBuildVersion,
 					nvgpu.NV0080_CTRL_CMD_FIFO_GET_CHANNELLIST:                             ctrlDevFIFOGetChannelList,
+					nvgpu.NV0080_CTRL_CMD_GPU_GET_CLASSLIST:                                ctrlDevGpuGetClasslist,
 					nvgpu.NV2080_CTRL_CMD_FIFO_DISABLE_CHANNELS:                            ctrlSubdevFIFODisableChannels,
 					nvgpu.NV2080_CTRL_CMD_GR_GET_INFO:                                      ctrlSubdevGRGetInfo,
 				},
@@ -278,6 +283,7 @@ func Init() {
 					nvgpu.NV01_EVENT_OS_EVENT:     rmAllocEventOSEvent,
 					nvgpu.NV01_DEVICE_0:           rmAllocSimple[nvgpu.NV0080_ALLOC_PARAMETERS],
 					nvgpu.NV20_SUBDEVICE_0:        rmAllocSimple[nvgpu.NV2080_ALLOC_PARAMETERS],
+					nvgpu.NV50_P2P:                rmAllocSimple[nvgpu.NV503B_ALLOC_PARAMETERS],
 					nvgpu.NV50_THIRD_PARTY_P2P:    rmAllocSimple[nvgpu.NV503C_ALLOC_PARAMETERS],
 					nvgpu.GT200_DEBUGGER:          rmAllocSimple[nvgpu.NV83DE_ALLOC_PARAMETERS],
 					nvgpu.FERMI_CONTEXT_SHARE_A:   rmAllocSimple[nvgpu.NV_CTXSHARE_ALLOCATION_PARAMETERS],
@@ -309,16 +315,16 @@ func Init() {
 		// the main branch at 525.89.02.
 		v525_105_17Checksum := "c635a21a282c9b53485f19ebb64a0f4b536a968b94d4d97629e0bc547a58142a"
 		v525_105_17 := addDriverABI(525, 105, 17, v525_105_17Checksum, v525_89_02)
-
 		v525_125_06Checksum := "b5275689f4a833c37a507717ac8f0ee2f1f5cd2b7e236ffa70aad8dfb7455b9d"
 		_ = addDriverABI(525, 125, 06, v525_125_06Checksum, v525_105_17)
 
-		// v535.43.02 is an intermediate unqualified version from the main branch.
+		// 535.43.02 is an intermediate unqualified version from the main branch.
 		v535_43_02 := func() *driverABI {
 			abi := v525_89_02()
 			abi.useRmAllocParamsV535 = true
 			abi.controlCmd[nvgpu.NV_CONF_COMPUTE_CTRL_CMD_SYSTEM_GET_CAPABILITIES] = rmControlSimple
 			abi.allocationClass[nvgpu.NV_CONFIDENTIAL_COMPUTE] = rmAllocSimple[nvgpu.NV_CONFIDENTIAL_COMPUTE_ALLOC_PARAMS]
+			abi.allocationClass[nvgpu.NV50_P2P] = rmAllocSimple[nvgpu.NV503B_ALLOC_PARAMETERS_V535]
 			abi.allocationClass[nvgpu.NV_MEMORY_FABRIC] = rmAllocSimple[nvgpu.NV00F8_ALLOCATION_PARAMETERS_V535]
 			abi.uvmIoctl[nvgpu.UVM_MM_INITIALIZE] = uvmMMInitialize
 			return abi
@@ -329,18 +335,73 @@ func Init() {
 		v535_104_05Checksum := "2f9d609d1da770beee757636635c46e7ed8253ade887b87c7a5482e33fcbedc9"
 		v535_104_05 := addDriverABI(535, 104, 05, v535_104_05Checksum, v535_54_03)
 
-		// The following version does not exist on the main branch. It branched off
-		// the main branch at 535.104.05.
+		// 535.104.12 does not exist on the main branch. It branched off the main
+		// branch at 535.104.05.
 		v535_104_12Checksum := "ffc2d89e233d2427edb1ff5f436028a94b3ef86e78f97e088e11d905c82e8001"
 		_ = addDriverABI(535, 104, 12, v535_104_12Checksum, v535_104_05)
+
+		// 535.113.01 is an intermediate unqualified version from the main branch.
+		v535_113_01 := v535_104_05
+
+		// 535.129.03 does not exist on the main branch. It branched off the main
+		// branch at 535.113.01.
+		_ = addDriverABI(535, 129, 03, "e6dca5626a2608c6bb2a046cfcb7c1af338b9e961a7dd90ac09bb8a126ff002e", v535_113_01)
 	})
 }
 
-// GetSupportedDriversAndChecksums returns supported driver ABIs.
-func GetSupportedDriversAndChecksums() map[DriverVersion]string {
-	versions := make(map[DriverVersion]string, len(abis))
+// ForEachSupportDriver calls f on all supported drivers.
+// Precondition: Init() must have been called.
+func ForEachSupportDriver(f func(version DriverVersion, checksum string)) {
 	for version, abi := range abis {
-		versions[version] = abi.checksum
+		f(version, abi.checksum)
 	}
-	return versions
+}
+
+// LatestDriver returns the latest supported driver.
+// Precondition: Init() must have been called.
+func LatestDriver() DriverVersion {
+	var ret DriverVersion
+	for version := range abis {
+		if version.isGreaterThan(ret) {
+			ret = version
+		}
+	}
+	return ret
+}
+
+// ExpectedDriverChecksum returns the expected checksum for a given version.
+// Precondition: Init() must have been called.
+func ExpectedDriverChecksum(version DriverVersion) (string, bool) {
+	abi, ok := abis[version]
+	if !ok {
+		return "", false
+	}
+	return abi.checksum, true
+}
+
+// SupportedIoctls returns the ioctl numbers that are supported by nvproxy at
+// a given version.
+func SupportedIoctls(version DriverVersion) (frontendIoctls map[uint32]struct{}, uvmIoctls map[uint32]struct{}, controlCmds map[uint32]struct{}, allocClasses map[uint32]struct{}, ok bool) {
+	abiCons, ok := abis[version]
+	if !ok {
+		return nil, nil, nil, nil, false
+	}
+	abi := abiCons.cons()
+	frontendIoctls = make(map[uint32]struct{})
+	for ioc := range abi.frontendIoctl {
+		frontendIoctls[ioc] = struct{}{}
+	}
+	uvmIoctls = make(map[uint32]struct{})
+	for ioc := range abi.uvmIoctl {
+		uvmIoctls[ioc] = struct{}{}
+	}
+	controlCmds = make(map[uint32]struct{})
+	for cmd := range abi.controlCmd {
+		controlCmds[cmd] = struct{}{}
+	}
+	allocClasses = make(map[uint32]struct{})
+	for class := range abi.allocationClass {
+		allocClasses[class] = struct{}{}
+	}
+	return
 }

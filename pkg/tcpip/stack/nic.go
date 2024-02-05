@@ -420,7 +420,7 @@ func (n *nic) Spoofing() bool {
 
 // primaryAddress returns an address that can be used to communicate with
 // remoteAddr.
-func (n *nic) primaryEndpoint(protocol tcpip.NetworkProtocolNumber, remoteAddr tcpip.Address) AssignableAddressEndpoint {
+func (n *nic) primaryEndpoint(protocol tcpip.NetworkProtocolNumber, remoteAddr, srcHint tcpip.Address) AssignableAddressEndpoint {
 	ep := n.getNetworkEndpoint(protocol)
 	if ep == nil {
 		return nil
@@ -431,7 +431,7 @@ func (n *nic) primaryEndpoint(protocol tcpip.NetworkProtocolNumber, remoteAddr t
 		return nil
 	}
 
-	return addressableEndpoint.AcquireOutgoingPrimaryAddress(remoteAddr, n.Spoofing())
+	return addressableEndpoint.AcquireOutgoingPrimaryAddress(remoteAddr, srcHint, n.Spoofing())
 }
 
 type getAddressBehaviour int
@@ -928,7 +928,7 @@ func (n *nic) setNUDConfigs(protocol tcpip.NetworkProtocolNumber, c NUDConfigura
 	return &tcpip.ErrNotSupported{}
 }
 
-func (n *nic) registerPacketEndpoint(netProto tcpip.NetworkProtocolNumber, ep PacketEndpoint) tcpip.Error {
+func (n *nic) registerPacketEndpoint(netProto tcpip.NetworkProtocolNumber, ep PacketEndpoint) {
 	n.packetEPsMu.Lock()
 	defer n.packetEPsMu.Unlock()
 
@@ -938,8 +938,6 @@ func (n *nic) registerPacketEndpoint(netProto tcpip.NetworkProtocolNumber, ep Pa
 		n.packetEPs[netProto] = eps
 	}
 	eps.add(ep)
-
-	return nil
 }
 
 func (n *nic) unregisterPacketEndpoint(netProto tcpip.NetworkProtocolNumber, ep PacketEndpoint) {

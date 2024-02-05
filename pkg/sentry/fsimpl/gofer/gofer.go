@@ -98,6 +98,9 @@ const (
 	cacheRemoteRevalidating  = "remote_revalidating"
 )
 
+// SupportedMountOptions is the set of mount options that can be set externally.
+var SupportedMountOptions = []string{moptOverlayfsStaleRead, moptDisableFileHandleSharing}
+
 const (
 	defaultMaxCachedDentries  = 1000
 	maxCachedNegativeChildren = 1000
@@ -360,7 +363,7 @@ const (
 type InternalFilesystemOptions struct {
 	// If UniqueID is non-empty, it is an opaque string used to reassociate the
 	// filesystem with a new server FD during restoration from checkpoint.
-	UniqueID string
+	UniqueID vfs.RestoreID
 
 	// If LeakConnection is true, do not close the connection to the server
 	// when the Filesystem is released. This is necessary for deployments in
@@ -675,17 +678,8 @@ func (fs *filesystem) Release(ctx context.Context) {
 		d.cache.DropAll(mf)
 		d.dirty.RemoveAll()
 		d.dataMu.Unlock()
-		// Close host FDs if they exist. We can use RacyLoad() because d.handleMu
-		// is locked.
-		if d.readFD.RacyLoad() >= 0 {
-			_ = unix.Close(int(d.readFD.RacyLoad()))
-		}
-		if d.writeFD.RacyLoad() >= 0 && d.readFD.RacyLoad() != d.writeFD.RacyLoad() {
-			_ = unix.Close(int(d.writeFD.RacyLoad()))
-		}
-		d.readFD = atomicbitops.FromInt32(-1)
-		d.writeFD = atomicbitops.FromInt32(-1)
-		d.mmapFD = atomicbitops.FromInt32(-1)
+		// Close host FDs if they exist.
+		d.closeHostFDs()
 		d.handleMu.Unlock()
 	}
 	// There can't be any specialFileFDs still using fs, since each such

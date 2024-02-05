@@ -19,6 +19,14 @@ const (
 	RM_GSS_LEGACY_MASK = 0x00008000
 )
 
+// From src/nvidia/inc/kernel/rmapi/param_copy.h:
+const (
+	// RMAPI_PARAM_COPY_MAX_PARAMS_SIZE is the size limit imposed while copying
+	// "embedded pointers" in rmapi parameter structs.
+	// See src/nvidia/src/kernel/rmapi/param_copy.c:rmapiParamsAcquire().
+	RMAPI_PARAM_COPY_MAX_PARAMS_SIZE = 1 * 1024 * 1024
+)
+
 // From src/common/sdk/nvidia/inc/ctrl/ctrlxxxx.h:
 
 // +marshal
@@ -90,11 +98,19 @@ type NV0080_CTRL_FIFO_GET_CHANNELLIST_PARAMS struct {
 
 // From src/common/sdk/nvidia/inc/ctrl/ctrl0080/ctrl0080gpu.h:
 const (
+	NV0080_CTRL_CMD_GPU_GET_CLASSLIST              = 0x800201
 	NV0080_CTRL_CMD_GPU_GET_NUM_SUBDEVICES         = 0x800280
 	NV0080_CTRL_CMD_GPU_QUERY_SW_STATE_PERSISTENCE = 0x800288
 	NV0080_CTRL_CMD_GPU_GET_VIRTUALIZATION_MODE    = 0x800289
 	NV0080_CTRL_CMD_GPU_GET_CLASSLIST_V2           = 0x800292
 )
+
+// +marshal
+type NV0080_CTRL_GPU_GET_CLASSLIST_PARAMS struct {
+	NumClasses uint32
+	Pad        [4]byte
+	ClassList  P64
+}
 
 // From src/common/sdk/nvidia/inc/ctrl/ctrl0080/ctrl0080gr.h:
 
@@ -161,6 +177,8 @@ const (
 	NV2080_CTRL_CMD_GPU_GET_GID_INFO                     = 0x2080014a
 	NV2080_CTRL_CMD_GPU_GET_ENGINES_V2                   = 0x20800170
 	NV2080_CTRL_CMD_GPU_GET_ACTIVE_PARTITION_IDS         = 0x2080018b
+	NV2080_CTRL_CMD_GPU_GET_PIDS                         = 0x2080018d
+	NV2080_CTRL_CMD_GPU_GET_PID_INFO                     = 0x2080018e
 	NV2080_CTRL_CMD_GPU_GET_COMPUTE_POLICY_CONFIG        = 0x20800195
 	NV2080_CTRL_CMD_GET_GPU_FABRIC_PROBE_INFO            = 0x208001a3
 )
@@ -197,6 +215,7 @@ const (
 
 // From src/common/sdk/nvidia/inc/ctrl/ctrl2080/ctrl2080nvlink.h:
 const (
+	NV2080_CTRL_CMD_NVLINK_GET_NVLINK_CAPS   = 0x20803001
 	NV2080_CTRL_CMD_NVLINK_GET_NVLINK_STATUS = 0x20803002
 )
 
@@ -252,6 +271,11 @@ const (
 	NVA06C_CTRL_CMD_GPFIFO_SCHEDULE = 0xa06c0101
 	NVA06C_CTRL_CMD_SET_TIMESLICE   = 0xa06c0103
 	NVA06C_CTRL_CMD_PREEMPT         = 0xa06c0105
+)
+
+// From src/common/sdk/nvidia/inc/ctrl/ctrla06f/ctrla06fgpfifo.h:
+const (
+	NVA06F_CTRL_CMD_GPFIFO_SCHEDULE = 0xa06f0103
 )
 
 // From src/common/sdk/nvidia/inc/ctrl/ctrlcb33.h:

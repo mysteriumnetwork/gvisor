@@ -338,7 +338,16 @@ func (vfs *VirtualFilesystem) forgetDeadMountpoint(ctx context.Context, d *Dentr
 	vfs.lockMounts()
 	defer vfs.unlockMounts(ctx)
 	for mnt := range vfs.mountpoints[d] {
-		vfs.umountTreeLocked(mnt, &umountRecursiveOptions{})
+		// If umounted is true, the mount point has already been decrefed by umount
+		// so we don't need to release the reference again here.
+		if mnt.umounted {
+			vfs.mounts.seq.BeginWrite()
+			vfs.disconnectLocked(mnt)
+			vfs.delayDecRef(mnt)
+			vfs.mounts.seq.EndWrite()
+		} else {
+			vfs.umountTreeLocked(mnt, &umountRecursiveOptions{})
+		}
 	}
 	return vfs.PopDelayedDecRefs()
 }

@@ -549,6 +549,13 @@ func rmControlSimple(fi *frontendIoctlState, ioctlParams *nvgpu.NVOS54Parameters
 	return n, nil
 }
 
+func ctrlCmdFailWithStatus(fi *frontendIoctlState, ioctlParams *nvgpu.NVOS54Parameters, status uint32) error {
+	outIoctlParams := *ioctlParams
+	outIoctlParams.Status = status
+	_, err := outIoctlParams.CopyOut(fi.t, fi.ioctlParamsAddr)
+	return err
+}
+
 func ctrlClientSystemGetBuildVersion(fi *frontendIoctlState, ioctlParams *nvgpu.NVOS54Parameters) (uintptr, error) {
 	var ctrlParams nvgpu.NV0000_CTRL_SYSTEM_GET_BUILD_VERSION_PARAMS
 	if ctrlParams.SizeBytes() != int(ioctlParams.ParamsSize) {
@@ -582,6 +589,37 @@ func ctrlClientSystemGetBuildVersion(fi *frontendIoctlState, ioctlParams *nvgpu.
 		return n, err
 	}
 	if _, err := fi.t.CopyOutBytes(addrFromP64(ctrlParams.PTitleBuffer), titleBuf); err != nil {
+		return n, err
+	}
+	return n, nil
+}
+
+func ctrlDevGpuGetClasslist(fi *frontendIoctlState, ioctlParams *nvgpu.NVOS54Parameters) (uintptr, error) {
+	var ctrlParams nvgpu.NV0080_CTRL_GPU_GET_CLASSLIST_PARAMS
+	if ctrlParams.SizeBytes() != int(ioctlParams.ParamsSize) {
+		return 0, linuxerr.EINVAL
+	}
+	if _, err := ctrlParams.CopyIn(fi.t, addrFromP64(ioctlParams.Params)); err != nil {
+		return 0, err
+	}
+
+	// This command has two modes. If the classList pointer is NULL, only simple command handling
+	// is required; see src/common/sdk/nvidia/inc/ctrl/ctrl0080gpu.h.
+	if ctrlParams.ClassList == 0 {
+		return rmControlSimple(fi, ioctlParams)
+	}
+
+	// classList pointer is not NULL. Check classList size against limit. See
+	// src/nvidia/src/kernel/rmapi/embedded_param_copy.c:embeddedParamCopyIn() =>
+	// case NV0080_CTRL_CMD_GPU_GET_CLASSLIST => RMAPI_PARAM_COPY_INIT().
+	// paramCopy.paramsSize is initialized as numClasses * sizeof(NvU32).
+	if ctrlParams.NumClasses*4 > nvgpu.RMAPI_PARAM_COPY_MAX_PARAMS_SIZE {
+		return 0, ctrlCmdFailWithStatus(fi, ioctlParams, nvgpu.NV_ERR_INVALID_ARGUMENT)
+	}
+
+	classList := make([]uint32, ctrlParams.NumClasses)
+	n, err := ctrlDevGpuGetClasslistInvoke(fi, ioctlParams, &ctrlParams, classList)
+	if err != nil {
 		return n, err
 	}
 	return n, nil

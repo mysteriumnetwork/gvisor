@@ -33,3 +33,8 @@ func (*KVM) archSyscallFilters() seccomp.SyscallRules {
 		},
 	})
 }
+
+// hottestSyscalls returns the list of hot syscalls for the KVM platform.
+func hottestSyscalls() []uintptr {
+	return nil
+}

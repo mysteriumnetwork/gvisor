@@ -17,7 +17,6 @@ package seccomp
 import (
 	"fmt"
 	"sort"
-	"strconv"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -52,6 +51,8 @@ func seccompDataOffsetArgHigh(i int) uint32 {
 // or RIP value.
 type ValueMatcher interface {
 	// String returns a human-readable representation of the match rule.
+	// If the returned string contains "VAL", it will be replaced with
+	// the symbolic name of the value being matched against.
 	String() string
 
 	// Repr returns a string that will be used for asserting equality between
@@ -73,6 +74,12 @@ type ValueMatcher interface {
 
 // halfValueMatcher verifies a 32-bit value.
 type halfValueMatcher interface {
+	// String returns a human-friendly representation of the check being done
+	// against the 32-bit value.
+	// The string "x.(high|low) {{halfValueMatcher.String()}}" should read well,
+	// e.g. "x.low == 0xffff".
+	String() string
+
 	// Repr returns a string that will be used for asserting equality between
 	// two `halfValueMatcher` instances. It must therefore be unique to the
 	// `halfValueMatcher` implementation and to its parameters.
@@ -93,6 +100,11 @@ type halfValueMatcher interface {
 // halfAnyValue implements `halfValueMatcher` and matches any value.
 type halfAnyValue struct{}
 
+// String implements `halfValueMatcher.String`.
+func (halfAnyValue) String() string {
+	return "== *"
+}
+
 // Repr implements `halfValueMatcher.Repr`.
 func (halfAnyValue) Repr() string {
 	return "halfAnyValue"
@@ -106,9 +118,17 @@ func (halfAnyValue) HalfRender(program *syscallProgram, labelSet *labelSet) {
 // halfEqualTo implements `halfValueMatcher` and matches a specific 32-bit value.
 type halfEqualTo uint32
 
+// String implements `halfValueMatcher.String`.
+func (heq halfEqualTo) String() string {
+	if heq == 0 {
+		return "== 0"
+	}
+	return fmt.Sprintf("== %#x", uint32(heq))
+}
+
 // Repr implements `halfValueMatcher.Repr`.
 func (heq halfEqualTo) Repr() string {
-	return fmt.Sprintf("halfEq(%d)", uint32(heq))
+	return fmt.Sprintf("halfEq(%#x)", uint32(heq))
 }
 
 // HalfRender implements `halfValueMatcher.HalfRender`.
@@ -121,9 +141,14 @@ func (heq halfEqualTo) HalfRender(program *syscallProgram, labelSet *labelSet) {
 // bitwise operation.
 type halfNotSet uint32
 
+// String implements `halfValueMatcher.String`.
+func (hns halfNotSet) String() string {
+	return fmt.Sprintf("& %#x == 0", uint32(hns))
+}
+
 // Repr implements `halfValueMatcher.Repr`.
 func (hns halfNotSet) Repr() string {
-	return fmt.Sprintf("halfNotSet(%x)", uint32(hns))
+	return fmt.Sprintf("halfNotSet(%#x)", uint32(hns))
 }
 
 // HalfRender implements `halfValueMatcher.HalfRender`.
@@ -139,9 +164,17 @@ type halfMaskedEqual struct {
 	value uint32
 }
 
+// String implements `halfValueMatcher.String`.
+func (hmeq halfMaskedEqual) String() string {
+	if hmeq.value == 0 {
+		return fmt.Sprintf("& %#x == 0", hmeq.mask)
+	}
+	return fmt.Sprintf("& %#x == %#x", hmeq.mask, hmeq.value)
+}
+
 // Repr implements `halfValueMatcher.Repr`.
 func (hmeq halfMaskedEqual) Repr() string {
-	return fmt.Sprintf("halfMaskedEqual(%x, %x)", hmeq.mask, hmeq.value)
+	return fmt.Sprintf("halfMaskedEqual(%#x, %#x)", hmeq.mask, hmeq.value)
 }
 
 // HalfRender implements `halfValueMatcher.HalfRender`.
@@ -167,21 +200,64 @@ type splitMatcher struct {
 
 // String implements `ValueMatcher.String`.
 func (sm splitMatcher) String() string {
-	return sm.Repr()
+	if sm.repr == "" {
+		_, highIsAnyValue := sm.highMatcher.(halfAnyValue)
+		_, lowIsAnyValue := sm.lowMatcher.(halfAnyValue)
+		if highIsAnyValue && lowIsAnyValue {
+			return "== *"
+		}
+		if highIsAnyValue {
+			return fmt.Sprintf("VAL.low %s", sm.lowMatcher.String())
+		}
+		if lowIsAnyValue {
+			return fmt.Sprintf("VAL.high %s", sm.highMatcher.String())
+		}
+		return fmt.Sprintf("(VAL.high %s && VAL.low %s)", sm.highMatcher.String(), sm.lowMatcher.String())
+	}
+	return sm.repr
 }
 
 // Repr implements `ValueMatcher.Repr`.
 func (sm splitMatcher) Repr() string {
+	if sm.repr == "" {
+		_, highIsAnyValue := sm.highMatcher.(halfAnyValue)
+		_, lowIsAnyValue := sm.lowMatcher.(halfAnyValue)
+		if highIsAnyValue && lowIsAnyValue {
+			return "split(*)"
+		}
+		if highIsAnyValue {
+			return fmt.Sprintf("low=%s", sm.lowMatcher.Repr())
+		}
+		if lowIsAnyValue {
+			return fmt.Sprintf("high=%s", sm.highMatcher.Repr())
+		}
+		return fmt.Sprintf("(high=%s && low=%s)", sm.highMatcher.Repr(), sm.lowMatcher.Repr())
+	}
 	return sm.repr
 }
 
 // Render implements `ValueMatcher.Render`.
 func (sm splitMatcher) Render(program *syscallProgram, labelSet *labelSet, value matchedValue) {
+	_, highIsAny := sm.highMatcher.(halfAnyValue)
+	_, lowIsAny := sm.lowMatcher.(halfAnyValue)
+	if highIsAny && lowIsAny {
+		program.JumpTo(labelSet.Matched())
+		return
+	}
+	if highIsAny {
+		value.LoadLow32Bits()
+		sm.lowMatcher.HalfRender(program, labelSet)
+		return
+	}
+	if lowIsAny {
+		value.LoadHigh32Bits()
+		sm.highMatcher.HalfRender(program, labelSet)
+		return
+	}
 	// We render the "low" bits first on the assumption that most syscall
 	// arguments fit within 32-bits, and those rules actually only care
 	// about the value of the low 32 bits. This way, we only check the
 	// high 32 bits if the low 32 bits have already matched.
-
 	lowLabels := labelSet.Push("low", labelSet.NewLabel(), labelSet.Mismatched())
 	lowFrag := program.Record()
 	value.LoadLow32Bits()
@@ -193,6 +269,24 @@ func (sm splitMatcher) Render(program *syscallProgram, labelSet *labelSet, value
 	value.LoadHigh32Bits()
 	sm.highMatcher.HalfRender(program, labelSet.Push("high", labelSet.Matched(), labelSet.Mismatched()))
 	highFrag.MustHaveJumpedTo(labelSet.Matched(), labelSet.Mismatched())
+}
+
+// high32BitsMatch returns a `splitMatcher` that only matches the high 32 bits
+// of a 64-bit value.
+func high32BitsMatch(hvm halfValueMatcher) splitMatcher {
+	return splitMatcher{
+		highMatcher: hvm,
+		lowMatcher:  halfAnyValue{},
+	}
+}
+
+// low32BitsMatch returns a `splitMatcher` that only matches the low 32 bits
+// of a 64-bit value.
+func low32BitsMatch(hvm halfValueMatcher) splitMatcher {
+	return splitMatcher{
+		highMatcher: halfAnyValue{},
+		lowMatcher:  hvm,
+	}
 }
 
 // splittableValueMatcher should be implemented by `ValueMatcher` that can
@@ -243,6 +337,9 @@ type EqualTo uintptr
 
 // String implements `ValueMatcher.String`.
 func (eq EqualTo) String() string {
+	if eq == 0 {
+		return "== 0"
+	}
 	return fmt.Sprintf("== %#x", uintptr(eq))
 }
 
@@ -412,12 +509,12 @@ type NonNegativeFD struct{}
 
 // String implements `ValueMatcher.String`.
 func (NonNegativeFD) String() string {
-	return fmt.Sprintf("NonNegativeFD")
+	return "is non-negative FD"
 }
 
 // Repr implements `ValueMatcher.Repr`.
 func (NonNegativeFD) Repr() string {
-	return NonNegativeFD{}.String()
+	return "NonNegativeFD"
 }
 
 // Render implements `ValueMatcher.Render`.
@@ -478,6 +575,12 @@ func MaskedEqual(mask, value uintptr) ValueMatcher {
 	}
 }
 
+// BitsAllowlist specifies that a value can only have non-zero bits within
+// the mask specified in `allowlist`. It implements `ValueMatcher`.
+func BitsAllowlist(allowlist uintptr) ValueMatcher {
+	return MaskedEqual(^allowlist, 0)
+}
+
 // SyscallRule expresses a set of rules to verify the arguments of a specific
 // syscall.
 type SyscallRule interface {
@@ -487,6 +590,9 @@ type SyscallRule interface {
 	// not "fall through" to whatever instructions will be added
 	// next into the program.
 	Render(program *syscallProgram, labelSet *labelSet)
+
+	// Copy returns a copy of this `SyscallRule`.
+	Copy() SyscallRule
 
 	// Recurse should call the given function on all `SyscallRule`s that are
 	// part of this `SyscallRule`, and should replace them with the returned
@@ -505,6 +611,11 @@ type MatchAll struct{}
 // Render implements `SyscallRule.Render`.
 func (MatchAll) Render(program *syscallProgram, labelSet *labelSet) {
 	program.JumpTo(labelSet.Matched())
+}
+
+// Copy implements `SyscallRule.Copy`.
+func (MatchAll) Copy() SyscallRule {
+	return MatchAll{}
 }
 
 // Recurse implements `SyscallRule.Recurse`.
@@ -532,6 +643,15 @@ func (or Or) Render(program *syscallProgram, labelSet *labelSet) {
 		program.Label(nextRuleLabel)
 	}
 	program.JumpTo(labelSet.Mismatched())
+}
+
+// Copy implements `SyscallRule.Copy`.
+func (or Or) Copy() SyscallRule {
+	orCopy := make([]SyscallRule, len(or))
+	for i, rule := range or {
+		orCopy[i] = rule.Copy()
+	}
+	return Or(orCopy)
 }
 
 // Recurse implements `SyscallRule.Recurse`.
@@ -583,6 +703,15 @@ func (and And) Render(program *syscallProgram, labelSet *labelSet) {
 	program.JumpTo(labelSet.Matched())
 }
 
+// Copy implements `SyscallRule.Copy`.
+func (and And) Copy() SyscallRule {
+	andCopy := make([]SyscallRule, len(and))
+	for i, rule := range and {
+		andCopy[i] = rule.Copy()
+	}
+	return And(andCopy)
+}
+
 // Recurse implements `SyscallRule.Recurse`.
 func (and And) Recurse(fn func(SyscallRule) SyscallRule) {
 	for i, rule := range and {
@@ -625,6 +754,8 @@ type PerArg [7]ValueMatcher // 6 arguments + RIP
 const RuleIP = 6
 
 // clone returns a copy of this `PerArg`.
+// It is more efficient than `Copy` because it returns a `PerArg`
+// directly, rather than a `SyscallRule` interface.
 func (pa PerArg) clone() PerArg {
 	return PerArg{
 		pa[0],
@@ -635,6 +766,11 @@ func (pa PerArg) clone() PerArg {
 		pa[5],
 		pa[6],
 	}
+}
+
+// Copy implements `SyscallRule.Copy`.
+func (pa PerArg) Copy() SyscallRule {
+	return pa.clone()
 }
 
 // Render implements `SyscallRule.Render`.
@@ -676,39 +812,32 @@ func (pa PerArg) String() string {
 	writtenArgs := 0
 	for i, arg := range pa {
 		if arg == nil {
-			arg = AnyValue{}
+			continue
 		}
 		if _, isAny := arg.(AnyValue); isAny {
-			// Check if all future arguments are also "any value"; if so, stop here.
-			allIsAny := true
-			for j := i + 1; j < len(pa); j++ {
-				if pa[j] == nil {
-					continue
-				}
-				if _, isAny := pa[j].(AnyValue); !isAny {
-					allIsAny = false
-					break
-				}
-			}
-			if allIsAny {
-				break
-			}
+			continue
 		}
-		if i != 0 {
+		if writtenArgs != 0 {
 			sb.WriteString(" && ")
 		}
+		str := arg.String()
+		var varName string
 		if i == RuleIP {
-			sb.WriteString("rip")
+			varName = "rip"
 		} else {
-			sb.WriteString("arg")
-			sb.WriteString(strconv.Itoa(i))
+			varName = fmt.Sprintf("arg[%d]", i)
 		}
-		sb.WriteRune(' ')
-		sb.WriteString(arg.String())
+		if strings.Contains(str, "VAL") {
+			sb.WriteString(strings.ReplaceAll(str, "VAL", varName))
+		} else {
+			sb.WriteString(varName)
+			sb.WriteRune(' ')
+			sb.WriteString(str)
+		}
 		writtenArgs++
 	}
 	if writtenArgs == 0 {
-		return "*"
+		return "true"
 	}
 	if writtenArgs == 1 {
 		return sb.String()
@@ -829,11 +958,11 @@ func (sr SyscallRules) Merge(other SyscallRules) SyscallRules {
 	return sr
 }
 
-// Copy returns a copy of these SyscallRules.
+// Copy returns a deep copy of these SyscallRules.
 func (sr SyscallRules) Copy() SyscallRules {
 	rulesCopy := make(map[uintptr]SyscallRule, len(sr.rules))
 	for sysno, r := range sr.rules {
-		rulesCopy[sysno] = r
+		rulesCopy[sysno] = r.Copy()
 	}
 	return MakeSyscallRules(rulesCopy)
 }

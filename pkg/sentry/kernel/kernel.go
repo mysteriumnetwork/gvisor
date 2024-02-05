@@ -110,6 +110,16 @@ func (uc *UserCounters) decRLimitNProc() {
 	uc.rlimitNProc.Add(^uint64(0))
 }
 
+// CgroupMount contains the cgroup mount. These mounts are created for the root
+// container by default and are stored in the kernel.
+//
+// +stateify savable
+type CgroupMount struct {
+	Fs    *vfs.Filesystem
+	Root  *vfs.Dentry
+	Mount *vfs.Mount
+}
+
 // Kernel represents an emulated Linux kernel. It must be initialized by calling
 // Init() or LoadFrom().
 //
@@ -321,6 +331,13 @@ type Kernel struct {
 	// the system.
 	cgroupRegistry *CgroupRegistry
 
+	// cgroupMountsMap maps the cgroup controller names to the cgroup mounts
+	// created for the root container. These mounts are then bind mounted
+	// for other application containers by creating their own container
+	// directories.
+	cgroupMountsMap   map[string]*CgroupMount
+	cgroupMountsMapMu cgroupMountsMutex `state:"nosave"`
+
 	// userCountersMap maps auth.KUID into a set of user counters.
 	userCountersMap   map[auth.KUID]*UserCounters
 	userCountersMapMu userCountersMutex `state:"nosave"`
@@ -503,6 +520,57 @@ func (k *Kernel) Init(args InitKernelArgs) error {
 	return nil
 }
 
+// +stateify savable
+type privateMemoryFileMetadata struct {
+	owners []vfs.RestoreID
+}
+
+func savePrivateMFs(ctx context.Context, w wire.Writer, mfsToSave map[vfs.RestoreID]*pgalloc.MemoryFile) error {
+	var meta privateMemoryFileMetadata
+	// Generate the order in which private memory files are saved.
+	for fsID := range mfsToSave {
+		meta.owners = append(meta.owners, fsID)
+	}
+	// Save the metadata.
+	if _, err := state.Save(ctx, w, &meta); err != nil {
+		return err
+	}
+	// Followed by the private memory files in order.
+	for _, fsID := range meta.owners {
+		if err := mfsToSave[fsID].SaveTo(ctx, w); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func loadPrivateMFs(ctx context.Context, r wire.Reader) error {
+	// Load the metadata.
+	var meta privateMemoryFileMetadata
+	if _, err := state.Load(ctx, r, &meta); err != nil {
+		return err
+	}
+	var mfmap map[vfs.RestoreID]*pgalloc.MemoryFile
+	if mfmapv := ctx.Value(vfs.CtxFilesystemMemoryFileMap); mfmapv != nil {
+		mfmap = mfmapv.(map[vfs.RestoreID]*pgalloc.MemoryFile)
+	}
+	// Ensure that it is consistent with CtxFilesystemMemoryFileMap.
+	if len(mfmap) != len(meta.owners) {
+		return fmt.Errorf("inconsistent private memory files on restore: savedMFOwners = %v, CtxFilesystemMemoryFileMap = %v", meta.owners, mfmap)
+	}
+	// Load all private memory files.
+	for _, fsID := range meta.owners {
+		mf, ok := mfmap[fsID]
+		if !ok {
+			return fmt.Errorf("saved memory file for %q was not configured on restore", fsID)
+		}
+		if err := mf.LoadFrom(ctx, r); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // SaveTo saves the state of k to w.
 //
 // Preconditions: The kernel must be paused throughout the call to SaveTo.
@@ -526,10 +594,13 @@ func (k *Kernel) SaveTo(ctx context.Context, w wire.Writer) error {
 		return fmt.Errorf("failed to invalidate unsavable mappings: %v", err)
 	}
 
+	// Capture all private memory files.
+	mfsToSave := make(map[vfs.RestoreID]*pgalloc.MemoryFile)
+	vfsCtx := context.WithValue(ctx, vfs.CtxFilesystemMemoryFileMap, mfsToSave)
 	// Prepare filesystems for saving. This must be done after
 	// invalidateUnsavableMappings(), since dropping memory mappings may
 	// affect filesystem state (e.g. page cache reference counts).
-	if err := k.vfs.PrepareSave(ctx); err != nil {
+	if err := k.vfs.PrepareSave(vfsCtx); err != nil {
 		return err
 	}
 
@@ -564,12 +635,15 @@ func (k *Kernel) SaveTo(ctx context.Context, w wire.Writer) error {
 	log.Infof("Kernel save stats: %s", stats.String())
 	log.Infof("Kernel save took [%s].", time.Since(kernelStart))
 
-	// Save the memory file's state.
+	// Save the memory files' state.
 	memoryStart := time.Now()
 	if err := k.mf.SaveTo(ctx, w); err != nil {
 		return err
 	}
-	log.Infof("Memory save took [%s].", time.Since(memoryStart))
+	if err := savePrivateMFs(ctx, w, mfsToSave); err != nil {
+		return err
+	}
+	log.Infof("Memory files save took [%s].", time.Since(memoryStart))
 
 	log.Infof("Overall save took [%s].", time.Since(saveStart))
 
@@ -642,12 +716,15 @@ func (k *Kernel) LoadFrom(ctx context.Context, r wire.Reader, timeReady chan str
 	// Restore the root network stack.
 	k.rootNetworkNamespace.RestoreRootStack(net)
 
-	// Load the memory file's state.
+	// Load the memory files' state.
 	memoryStart := time.Now()
 	if err := k.mf.LoadFrom(ctx, r); err != nil {
 		return err
 	}
-	log.Infof("Memory load took [%s].", time.Since(memoryStart))
+	if err := loadPrivateMFs(ctx, r); err != nil {
+		return err
+	}
+	log.Infof("Memory files load took [%s].", time.Since(memoryStart))
 
 	log.Infof("Overall load took [%s]", time.Since(loadStart))
 
@@ -967,6 +1044,8 @@ func (k *Kernel) CreateProcess(args CreateProcessArgs) (*ThreadGroup, ThreadID, 
 		// A task with no parent starts out with no session keyring.
 		SessionKeyring: nil,
 	}
+	config.UTSNamespace.IncRef()
+	config.IPCNamespace.IncRef()
 	config.NetworkNamespace.IncRef()
 	t, err := k.tasks.NewTask(ctx, config)
 	if err != nil {
@@ -1321,13 +1400,11 @@ func (k *Kernel) RootUserNamespace() *auth.UserNamespace {
 
 // RootUTSNamespace returns the root UTSNamespace.
 func (k *Kernel) RootUTSNamespace() *UTSNamespace {
-	k.rootUTSNamespace.IncRef()
 	return k.rootUTSNamespace
 }
 
 // RootIPCNamespace takes a reference and returns the root IPCNamespace.
 func (k *Kernel) RootIPCNamespace() *IPCNamespace {
-	k.rootIPCNamespace.IncRef()
 	return k.rootIPCNamespace
 }
 
@@ -1571,13 +1648,13 @@ func (ctx *supervisorContext) Value(key any) any {
 		// The supervisor context is global root.
 		return auth.NewRootCredentials(ctx.Kernel.rootUserNamespace)
 	case vfs.CtxRoot:
-		if ctx.Kernel.globalInit == nil {
+		if ctx.Kernel.globalInit == nil || ctx.Kernel.globalInit.Leader() == nil {
 			return vfs.VirtualDentry{}
 		}
 		root := ctx.Kernel.GlobalInit().Leader().MountNamespace().Root(ctx)
 		return root
 	case vfs.CtxMountNamespace:
-		if ctx.Kernel.globalInit == nil {
+		if ctx.Kernel.globalInit == nil || ctx.Kernel.globalInit.Leader() == nil {
 			return nil
 		}
 		mntns := ctx.Kernel.GlobalInit().Leader().MountNamespace()
@@ -1675,12 +1752,46 @@ func (k *Kernel) CgroupRegistry() *CgroupRegistry {
 	return k.cgroupRegistry
 }
 
+// AddCgroupMount adds the cgroup mounts to the cgroupMountsMap. These cgroup
+// mounts are created during the creation of root container process and the
+// reference ownership is transferred to the kernel.
+func (k *Kernel) AddCgroupMount(ctl string, mnt *CgroupMount) {
+	k.cgroupMountsMapMu.Lock()
+	defer k.cgroupMountsMapMu.Unlock()
+
+	if k.cgroupMountsMap == nil {
+		k.cgroupMountsMap = make(map[string]*CgroupMount)
+	}
+	k.cgroupMountsMap[ctl] = mnt
+}
+
+// GetCgroupMount returns the cgroup mount for the given cgroup controller.
+func (k *Kernel) GetCgroupMount(ctl string) *CgroupMount {
+	k.cgroupMountsMapMu.Lock()
+	defer k.cgroupMountsMapMu.Unlock()
+
+	return k.cgroupMountsMap[ctl]
+}
+
+// releaseCgroupMounts releases the cgroup mounts.
+func (k *Kernel) releaseCgroupMounts(ctx context.Context) {
+	k.cgroupMountsMapMu.Lock()
+	defer k.cgroupMountsMapMu.Unlock()
+
+	for _, m := range k.cgroupMountsMap {
+		m.Mount.DecRef(ctx)
+		m.Root.DecRef(ctx)
+		m.Fs.DecRef(ctx)
+	}
+}
+
 // Release releases resources owned by k.
 //
 // Precondition: This should only be called after the kernel is fully
 // initialized, e.g. after k.Start() has been called.
 func (k *Kernel) Release() {
 	ctx := k.SupervisorContext()
+	k.releaseCgroupMounts(ctx)
 	k.hostMount.DecRef(ctx)
 	k.pipeMount.DecRef(ctx)
 	k.nsfsMount.DecRef(ctx)
@@ -1690,6 +1801,8 @@ func (k *Kernel) Release() {
 	k.timekeeper.Destroy()
 	k.vdso.Release(ctx)
 	k.RootNetworkNamespace().DecRef(ctx)
+	k.rootIPCNamespace.DecRef(ctx)
+	k.rootUTSNamespace.DecRef(ctx)
 	k.cleaupDevGofers()
 }
 

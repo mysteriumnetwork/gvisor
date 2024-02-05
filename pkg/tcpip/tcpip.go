@@ -112,6 +112,11 @@ func (mt MonotonicTime) Sub(u MonotonicTime) time.Duration {
 	return time.Unix(0, mt.nanoseconds).Sub(time.Unix(0, u.nanoseconds))
 }
 
+// Milliseconds returns the time in milliseconds.
+func (mt MonotonicTime) Milliseconds() int64 {
+	return mt.nanoseconds / 1e6
+}
+
 // A Clock provides the current time and schedules work for execution.
 //
 // Times returned by a Clock should always be used for application-visible
@@ -1494,6 +1499,10 @@ type Route struct {
 
 	// NIC is the id of the nic to be used if this row is viable.
 	NIC NICID
+
+	// SourceHint indicates a preferred source address to use when NICs
+	// have multiple addresses.
+	SourceHint Address
 }
 
 // String implements the fmt.Stringer interface.

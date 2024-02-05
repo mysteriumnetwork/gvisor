@@ -20,11 +20,13 @@ package config
 import (
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/refs"
 	"gvisor.dev/gvisor/pkg/sentry/watchdog"
 	"gvisor.dev/gvisor/runsc/flag"
@@ -58,7 +60,15 @@ type Config struct {
 	LogFormat string `flag:"log-format"`
 
 	// DebugLog is the path to log debug information to, if not empty.
+	// If specified together with `DebugToUserLog`, debug logs are emitted
+	// to both.
 	DebugLog string `flag:"debug-log"`
+
+	// DebugToUserLog indicates that Sentry debug logs should be emitted
+	// to user-visible logs.
+	// If specified together with `DebugLog`, debug logs are emitted
+	// to both.
+	DebugToUserLog bool `flag:"debug-to-user-log"`
 
 	// DebugCommand is a comma-separated list of commands to be debugged if
 	// --debug-log is also set. Empty means debug all. "!" negates the expression.
@@ -259,9 +269,6 @@ type Config struct {
 	// Enables seccomp inside the sandbox.
 	OCISeccomp bool `flag:"oci-seccomp"`
 
-	// Mounts the cgroup filesystem backed by the sentry's cgroupfs.
-	Cgroupfs bool `flag:"cgroupfs"`
-
 	// Don't configure cgroups.
 	IgnoreCgroups bool `flag:"ignore-cgroups"`
 
@@ -275,9 +282,12 @@ type Config struct {
 	// Use pools to manage buffer memory instead of heap.
 	BufferPooling bool `flag:"buffer-pooling"`
 
-	// AFXDP defines whether to use an AF_XDP socket to receive packets
-	// (rather than AF_PACKET). Enabling it disables RX checksum offload.
-	AFXDP bool `flag:"EXPERIMENTAL-afxdp"`
+	// XDP controls Whether and how to use XDP.
+	XDP XDP `flag:"EXPERIMENTAL-xdp"`
+
+	// AFXDPUseNeedWakeup determines whether XDP_USE_NEED_WAKEUP is set
+	// when using AF_XDP sockets.
+	AFXDPUseNeedWakeup bool `flag:"EXPERIMENTAL-xdp-need-wakeup"`
 
 	// FDLimit specifies a limit on the number of host file descriptors that can
 	// be open simultaneously by the sentry and gofer. It applies separately to
@@ -334,6 +344,10 @@ type Config struct {
 	// ReproduceNAT, when true, tells runsc to scrape the host network
 	// namespace's NAT iptables and reproduce it inside the sandbox.
 	ReproduceNAT bool `flag:"reproduce-nat"`
+
+	// ReproduceNftables attempts to scrape nftables routing rules if
+	// present, and reproduce them in the sandbox.
+	ReproduceNftables bool `flag:"reproduce-nftables"`
 }
 
 func (c *Config) validate() error {
@@ -370,6 +384,33 @@ func (c *Config) validate() error {
 		return fmt.Errorf("profiling-metrics flag requires defining a profiling-metrics-log for output")
 	}
 	return nil
+}
+
+// Log logs important aspects of the configuration to the given log function.
+func (c *Config) Log() {
+	log.Infof("Platform: %v", c.Platform)
+	log.Infof("RootDir: %s", c.RootDir)
+	log.Infof("FileAccess: %v / Directfs: %t / Overlay: %v", c.FileAccess, c.DirectFS, c.GetOverlay2())
+	log.Infof("Network: %v", c.Network)
+	if c.Debug || c.Strace {
+		log.Infof("Debug: %t. Strace: %t, max size: %d, syscalls: %s", c.Debug, c.Strace, c.StraceLogSize, c.StraceSyscalls)
+	}
+	if c.Debug {
+		obj := reflect.ValueOf(c).Elem()
+		st := obj.Type()
+		for i := 0; i < st.NumField(); i++ {
+			f := st.Field(i)
+			val := obj.Field(i).String()
+			if val == "" {
+				val = "(empty)"
+			}
+			if flagName, hasFlag := f.Tag.Lookup("flag"); hasFlag {
+				log.Debugf("Config.%s (--%s): %v", f.Name, flagName, val)
+			} else {
+				log.Debugf("Config.%s: %v", f.Name, val)
+			}
+		}
+	}
 }
 
 // GetHostUDS returns the FS gofer communication that is allowed, taking into
@@ -873,4 +914,88 @@ func (o *Overlay2) SubMountOverlayMedium() OverlayMedium {
 		return NoOverlay
 	}
 	return o.medium
+}
+
+// XDP holds configuration for whether and how to use XDP.
+type XDP struct {
+	Mode      XDPMode
+	IfaceName string
+}
+
+// XDPMode specifies a particular use of XDP.
+type XDPMode int
+
+const (
+	// XDPModeOff doesn't use XDP.
+	XDPModeOff XDPMode = iota
+
+	// XDPModeNS uses an AF_XDP socket to read from the VETH device inside
+	// the container's network namespace.
+	XDPModeNS
+
+	// XDPModeRedirect uses an AF_XDP socket on the host NIC to bypass the
+	// Linux network stack.
+	XDPModeRedirect
+
+	// XDPModeTunnel uses XDP_REDIRECT to redirect packets directy from the
+	// host NIC to the VETH device inside the container's network
+	// namespace. Packets are read from the VETH via AF_XDP, as in
+	// XDPModeNS.
+	XDPModeTunnel
+)
+
+const (
+	xdpModeStrOff      = "off"
+	xdpModeStrNS       = "ns"
+	xdpModeStrRedirect = "redirect"
+	xdpModeStrTunnel   = "tunnel"
+)
+
+var xdpConfig XDP
+
+// Get implements flag.Getter.
+func (xd *XDP) Get() any {
+	return *xd
+}
+
+// String implements flag.Getter.
+func (xd *XDP) String() string {
+	switch xd.Mode {
+	case XDPModeOff:
+		return xdpModeStrOff
+	case XDPModeNS:
+		return xdpModeStrNS
+	case XDPModeRedirect:
+		return fmt.Sprintf("%s:%s", xdpModeStrRedirect, xd.IfaceName)
+	case XDPModeTunnel:
+		return fmt.Sprintf("%s:%s", xdpModeStrTunnel, xd.IfaceName)
+	default:
+		panic(fmt.Sprintf("unknown mode %d", xd.Mode))
+	}
+}
+
+// Set implements flag.Getter.
+func (xd *XDP) Set(input string) error {
+	parts := strings.Split(input, ":")
+	if len(parts) > 2 {
+		return fmt.Errorf("invalid --xdp value: %q", input)
+	}
+
+	switch {
+	case input == xdpModeStrOff:
+		xd.Mode = XDPModeOff
+		xd.IfaceName = ""
+	case input == xdpModeStrNS:
+		xd.Mode = XDPModeNS
+		xd.IfaceName = ""
+	case len(parts) == 2 && parts[0] == xdpModeStrRedirect && parts[1] != "":
+		xd.Mode = XDPModeRedirect
+		xd.IfaceName = parts[1]
+	case len(parts) == 2 && parts[0] == xdpModeStrTunnel && parts[1] != "":
+		xd.Mode = XDPModeTunnel
+		xd.IfaceName = parts[1]
+	default:
+		return fmt.Errorf("invalid --xdp value: %q", input)
+	}
+	return nil
 }

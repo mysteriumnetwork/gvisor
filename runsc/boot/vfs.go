@@ -38,11 +38,13 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/devices/accel"
 	"gvisor.dev/gvisor/pkg/sentry/devices/memdev"
 	"gvisor.dev/gvisor/pkg/sentry/devices/nvproxy"
+	"gvisor.dev/gvisor/pkg/sentry/devices/tpuproxy"
 	"gvisor.dev/gvisor/pkg/sentry/devices/ttydev"
 	"gvisor.dev/gvisor/pkg/sentry/devices/tundev"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/cgroupfs"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/dev"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/devpts"
+	"gvisor.dev/gvisor/pkg/sentry/fsimpl/devtmpfs"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/erofs"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/fuse"
 	"gvisor.dev/gvisor/pkg/sentry/fsimpl/gofer"
@@ -55,6 +57,7 @@ import (
 	"gvisor.dev/gvisor/pkg/sentry/inet"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
 	"gvisor.dev/gvisor/pkg/sentry/kernel/auth"
+	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
 	"gvisor.dev/gvisor/pkg/sentry/vfs"
 	"gvisor.dev/gvisor/runsc/config"
 	"gvisor.dev/gvisor/runsc/specutils"
@@ -68,6 +71,11 @@ const (
 
 // SelfFilestorePrefix is the prefix of the self filestore file name.
 const SelfFilestorePrefix = ".gvisor.filestore."
+
+const (
+	pciPathGlobTPUv4 = "/sys/devices/pci0000:00/*/accel/accel*"
+	pciPathGlobTPUv5 = "/sys/devices/pci0000:00/*/vfio-dev/vfio*"
+)
 
 // SelfFilestorePath returns the path at which the self filestore file is
 // stored for a given mount.
@@ -101,6 +109,10 @@ func registerFilesystems(k *kernel.Kernel, info *containerInfo) error {
 		AllowUserMount: true,
 	})
 	vfsObj.MustRegisterFilesystemType(dev.Name, &dev.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{})
+	vfsObj.MustRegisterFilesystemType(devtmpfs.Name, &devtmpfs.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{
+		AllowUserMount: true,
+		AllowUserList:  true,
+	})
 	vfsObj.MustRegisterFilesystemType(erofs.Name, &erofs.FilesystemType{}, &vfs.RegisterFilesystemTypeOptions{
 		AllowUserList: true,
 	})
@@ -177,6 +189,22 @@ func setupContainerVFS(ctx context.Context, info *containerInfo, mntr *container
 	}
 	procArgs.MountNamespace = mns
 
+	// If cgroups are mounted, then only check for the cgroup mounts per
+	// container. Otherwise the root cgroups will be enabled.
+	if mntr.cgroupsMounted {
+		cgroupRegistry := mntr.k.CgroupRegistry()
+		for _, ctrl := range kernel.CgroupCtrls {
+			cg, err := cgroupRegistry.FindCgroup(ctx, ctrl, "/"+mntr.containerID)
+			if err != nil {
+				return fmt.Errorf("cgroup mount for controller %v not found", ctrl)
+			}
+			if procArgs.InitialCgroups == nil {
+				procArgs.InitialCgroups = make(map[kernel.Cgroup]struct{}, len(kernel.CgroupCtrls))
+			}
+			procArgs.InitialCgroups[cg] = struct{}{}
+		}
+	}
+
 	mnsRoot := mns.Root(rootCtx)
 	defer mnsRoot.DecRef(rootCtx)
 
@@ -201,18 +229,20 @@ func setupContainerVFS(ctx context.Context, info *containerInfo, mntr *container
 // mandatory mounts that are required by the OCI specification.
 //
 // This function must NOT add/remove any gofer mounts or change their order.
-func compileMounts(spec *specs.Spec, conf *config.Config) []specs.Mount {
+func compileMounts(spec *specs.Spec, conf *config.Config, containerID string) []specs.Mount {
 	// Keep track of whether proc and sys were mounted.
-	var procMounted, sysMounted, devMounted, devptsMounted bool
+	var procMounted, sysMounted, devMounted, devptsMounted, cgroupsMounted bool
 	var mounts []specs.Mount
 
 	// Mount all submounts from the spec.
 	for _, m := range spec.Mounts {
-		// Unconditionally drop any cgroupfs mounts. If requested, we'll add our
-		// own below.
-		if m.Type == cgroupfs.Name {
+		// Mount all the cgroup controllers when "/sys/fs/cgroup" mount
+		// is present. If any other cgroup controller mounts are there,
+		// it will be a no-op, drop them.
+		if m.Type == cgroupfs.Name && cgroupsMounted {
 			continue
 		}
+
 		switch filepath.Clean(m.Destination) {
 		case "/proc":
 			procMounted = true
@@ -224,30 +254,16 @@ func compileMounts(spec *specs.Spec, conf *config.Config) []specs.Mount {
 		case "/dev/pts":
 			m.Type = devpts.Name
 			devptsMounted = true
+		case "/sys/fs/cgroup":
+			cgroupsMounted = true
 		}
+
 		mounts = append(mounts, m)
 	}
 
 	// Mount proc and sys even if the user did not ask for it, as the spec
 	// says we SHOULD.
 	var mandatoryMounts []specs.Mount
-
-	if conf.Cgroupfs {
-		mandatoryMounts = append(mandatoryMounts, specs.Mount{
-			Type:        tmpfs.Name,
-			Destination: "/sys/fs/cgroup",
-		})
-		mandatoryMounts = append(mandatoryMounts, specs.Mount{
-			Type:        cgroupfs.Name,
-			Destination: "/sys/fs/cgroup/memory",
-			Options:     []string{"memory"},
-		})
-		mandatoryMounts = append(mandatoryMounts, specs.Mount{
-			Type:        cgroupfs.Name,
-			Destination: "/sys/fs/cgroup/cpu",
-			Options:     []string{"cpu"},
-		})
-	}
 
 	if !procMounted {
 		mandatoryMounts = append(mandatoryMounts, specs.Mount{
@@ -300,20 +316,22 @@ func goferMountData(fd int, fa config.FileAccessType, conf *config.Config) []str
 	return opts
 }
 
-// parseAndFilterOptions parses a MountOptions slice and filters by the allowed
-// keys.
-func parseAndFilterOptions(opts []string, allowedKeys ...string) ([]string, error) {
-	var out []string
+// consumeMountOptions consumes mount options from opts based on allowedKeys
+// and returns the remaining and consumed options.
+func consumeMountOptions(opts []string, allowedKeys ...string) ([]string, []string, error) {
+	var rem, out []string
 	for _, o := range opts {
 		ok, err := parseMountOption(o, allowedKeys...)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if ok {
 			out = append(out, o)
+		} else {
+			rem = append(rem, o)
 		}
 	}
-	return out, nil
+	return rem, out, nil
 }
 
 func parseMountOption(opt string, allowedKeys ...string) (bool, error) {
@@ -384,13 +402,19 @@ type containerMounter struct {
 	containerID string
 
 	// sandboxID is the ID for the whole sandbox.
-	sandboxID string
+	sandboxID     string
+	containerName string
+
+	// cgroupsMounted indicates if cgroups are mounted in the container.
+	// This is used to set the InitialCgroups before starting the container
+	// process.
+	cgroupsMounted bool
 }
 
 func newContainerMounter(info *containerInfo, k *kernel.Kernel, hints *PodMountHints, sharedMounts map[string]*vfs.Mount, productName string, sandboxID string) *containerMounter {
 	return &containerMounter{
 		root:              info.spec.Root,
-		mounts:            compileMounts(info.spec, info.conf),
+		mounts:            compileMounts(info.spec, info.conf, info.procArgs.ContainerID),
 		goferFDs:          fdDispenser{fds: info.goferFDs},
 		goferFilestoreFDs: fdDispenser{fds: info.goferFilestoreFDs},
 		devGoferFD:        info.devGoferFD,
@@ -401,6 +425,7 @@ func newContainerMounter(info *containerInfo, k *kernel.Kernel, hints *PodMountH
 		productName:       productName,
 		containerID:       info.procArgs.ContainerID,
 		sandboxID:         sandboxID,
+		containerName:     info.containerName,
 	}
 }
 
@@ -485,7 +510,10 @@ func (c *containerMounter) createMountNamespace(ctx context.Context, conf *confi
 				InternalMount: true,
 				Data:          strings.Join(data, ","),
 				InternalData: gofer.InternalFilesystemOptions{
-					UniqueID: "/",
+					UniqueID: vfs.RestoreID{
+						ContainerName: c.containerName,
+						Path:          "/",
+					},
 				},
 			},
 		}
@@ -498,7 +526,10 @@ func (c *containerMounter) createMountNamespace(ctx context.Context, conf *confi
 				InternalMount: true,
 				Data:          fmt.Sprintf("ifd=%d", ioFD),
 				InternalData: erofs.InternalFilesystemOptions{
-					UniqueID: "/",
+					UniqueID: vfs.RestoreID{
+						ContainerName: c.containerName,
+						Path:          "/",
+					},
 				},
 			},
 		}
@@ -519,7 +550,7 @@ func (c *containerMounter) createMountNamespace(ctx context.Context, conf *confi
 		if rootfsConf.IsFilestorePresent() {
 			filestoreFD = c.goferFilestoreFDs.removeAsFD()
 		}
-		opts, cleanup, err = c.configureOverlay(ctx, conf, creds, opts, fsName, filestoreFD, rootfsConf)
+		opts, cleanup, err = c.configureOverlay(ctx, conf, creds, opts, fsName, filestoreFD, rootfsConf, "/")
 		if err != nil {
 			return nil, fmt.Errorf("mounting root with overlay: %w", err)
 		}
@@ -531,7 +562,7 @@ func (c *containerMounter) createMountNamespace(ctx context.Context, conf *confi
 	// read-only tmpfs here. It simplifies creation of containers without
 	// leaking the root file system.
 	mns, err := c.k.VFS().NewMountNamespace(ctx, creds, "rootfs", "tmpfs",
-		&vfs.MountOptions{ReadOnly: true}, c.k)
+		&vfs.MountOptions{ReadOnly: true, Locked: true}, c.k)
 	if err != nil {
 		return nil, fmt.Errorf("setting up mount namespace: %w", err)
 	}
@@ -560,7 +591,7 @@ func (c *containerMounter) createMountNamespace(ctx context.Context, conf *confi
 // layer using tmpfs, and return overlay mount options. "cleanup" must be called
 // after the options have been used to mount the overlay, to release refs on
 // lower and upper mounts.
-func (c *containerMounter) configureOverlay(ctx context.Context, conf *config.Config, creds *auth.Credentials, lowerOpts *vfs.MountOptions, lowerFSName string, filestoreFD *fd.FD, mountConf GoferMountConf) (*vfs.MountOptions, func(), error) {
+func (c *containerMounter) configureOverlay(ctx context.Context, conf *config.Config, creds *auth.Credentials, lowerOpts *vfs.MountOptions, lowerFSName string, filestoreFD *fd.FD, mountConf GoferMountConf, dst string) (*vfs.MountOptions, func(), error) {
 	// First copy options from lower layer to upper layer and overlay. Clear
 	// filesystem specific options.
 	upperOpts := *lowerOpts
@@ -600,10 +631,18 @@ func (c *containerMounter) configureOverlay(ctx context.Context, conf *config.Co
 	// Upper is a tmpfs mount to keep all modifications inside the sandbox.
 	tmpfsOpts := tmpfs.FilesystemOpts{
 		RootFileType: uint16(rootType),
-		FilestoreFD:  filestoreFD,
 		// If a mount is being overlaid, it should not be limited by the default
 		// tmpfs size limit.
 		DisableDefaultSizeLimit: true,
+	}
+	if filestoreFD != nil {
+		// Create memory file for disk-backed overlays.
+		mf, err := createPrivateMemoryFile(filestoreFD.ReleaseToFile("overlay-filestore"))
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create memory file for overlay: %v", err)
+		}
+		tmpfsOpts.MemoryFile = mf
+		tmpfsOpts.UniqueID = vfs.RestoreID{ContainerName: c.containerName, Path: dst}
 	}
 	upperOpts.GetFilesystemOptions.InternalData = tmpfsOpts
 	upper, err := c.k.VFS().MountDisconnected(ctx, creds, "" /* source */, tmpfs.Name, &upperOpts)
@@ -701,6 +740,11 @@ func (c *containerMounter) mountSubmounts(ctx context.Context, spec *specs.Spec,
 			if err != nil {
 				return fmt.Errorf("mount shared mount %q to %q: %v", submount.hint.Name, submount.mount.Destination, err)
 			}
+		} else if submount.mount.Type == cgroupfs.Name {
+			// Mount all the cgroups controllers.
+			if err := c.mountCgroupSubmounts(ctx, spec, conf, mns, creds, submount); err != nil {
+				return fmt.Errorf("mount cgroup %q: %w", submount.mount.Destination, err)
+			}
 		} else {
 			mnt, err = c.mountSubmount(ctx, spec, conf, mns, creds, submount)
 			if err != nil {
@@ -782,7 +826,7 @@ func (c *containerMounter) prepareMounts() ([]mountInfo, error) {
 }
 
 func (c *containerMounter) mountSubmount(ctx context.Context, spec *specs.Spec, conf *config.Config, mns *vfs.MountNamespace, creds *auth.Credentials, submount *mountInfo) (*vfs.Mount, error) {
-	fsName, opts, err := getMountNameAndOptions(spec, conf, submount, c.productName)
+	fsName, opts, err := getMountNameAndOptions(spec, conf, submount, c.productName, c.containerName)
 	if err != nil {
 		return nil, fmt.Errorf("mountOptions failed: %w", err)
 	}
@@ -798,7 +842,7 @@ func (c *containerMounter) mountSubmount(ctx context.Context, spec *specs.Spec, 
 	if submount.goferMountConf.ShouldUseOverlayfs() {
 		log.Infof("Adding overlay on top of mount %q", submount.mount.Destination)
 		var cleanup func()
-		opts, cleanup, err = c.configureOverlay(ctx, conf, creds, opts, fsName, submount.filestoreFD, submount.goferMountConf)
+		opts, cleanup, err = c.configureOverlay(ctx, conf, creds, opts, fsName, submount.filestoreFD, submount.goferMountConf, submount.mount.Destination)
 		if err != nil {
 			return nil, fmt.Errorf("mounting volume with overlay at %q: %w", submount.mount.Destination, err)
 		}
@@ -823,9 +867,10 @@ func (c *containerMounter) mountSubmount(ctx context.Context, spec *specs.Spec, 
 
 // getMountNameAndOptions retrieves the fsName, opts, and useOverlay values
 // used for mounts.
-func getMountNameAndOptions(spec *specs.Spec, conf *config.Config, m *mountInfo, productName string) (string, *vfs.MountOptions, error) {
+func getMountNameAndOptions(spec *specs.Spec, conf *config.Config, m *mountInfo, productName, containerName string) (string, *vfs.MountOptions, error) {
 	fsName := m.mount.Type
 	var (
+		mopts        = m.mount.Options
 		data         []string
 		internalData any
 	)
@@ -839,7 +884,7 @@ func getMountNameAndOptions(spec *specs.Spec, conf *config.Config, m *mountInfo,
 		fsName = sys.Name
 
 	case sys.Name:
-		sysData := &sys.InternalData{EnableAccelSysfs: specutils.TPUProxyIsEnabled(spec, conf)}
+		sysData := &sys.InternalData{EnableTPUProxyPaths: specutils.TPUProxyIsEnabled(spec, conf)}
 		if len(productName) > 0 {
 			sysData.ProductName = productName
 		}
@@ -847,13 +892,18 @@ func getMountNameAndOptions(spec *specs.Spec, conf *config.Config, m *mountInfo,
 
 	case tmpfs.Name:
 		var err error
-		data, err = parseAndFilterOptions(m.mount.Options, tmpfsAllowedData...)
+		mopts, data, err = consumeMountOptions(mopts, tmpfsAllowedData...)
 		if err != nil {
 			return "", nil, err
 		}
 		if m.filestoreFD != nil {
+			mf, err := createPrivateMemoryFile(m.filestoreFD.ReleaseToFile("tmpfs-filestore"))
+			if err != nil {
+				return "", nil, fmt.Errorf("failed to create memory file for tmpfs: %v", err)
+			}
 			internalData = tmpfs.FilesystemOpts{
-				FilestoreFD: m.filestoreFD,
+				MemoryFile: mf,
+				UniqueID:   vfs.RestoreID{ContainerName: containerName, Path: m.mount.Destination},
 				// If a mount is being overlaid with tmpfs, it should not be limited by
 				// the default tmpfs size limit.
 				DisableDefaultSizeLimit: true,
@@ -866,14 +916,22 @@ func getMountNameAndOptions(spec *specs.Spec, conf *config.Config, m *mountInfo,
 			// Check that an FD was provided to fails fast.
 			return "", nil, fmt.Errorf("gofer mount requires a connection FD")
 		}
-		data = goferMountData(m.goferFD.Release(), getMountAccessType(conf, m.hint), conf)
+		var err error
+		mopts, data, err = consumeMountOptions(mopts, gofer.SupportedMountOptions...)
+		if err != nil {
+			return "", nil, err
+		}
+		data = append(data, goferMountData(m.goferFD.Release(), getMountAccessType(conf, m.hint), conf)...)
 		internalData = gofer.InternalFilesystemOptions{
-			UniqueID: m.mount.Destination,
+			UniqueID: vfs.RestoreID{
+				ContainerName: containerName,
+				Path:          m.mount.Destination,
+			},
 		}
 
 	case cgroupfs.Name:
 		var err error
-		data, err = parseAndFilterOptions(m.mount.Options, cgroupfs.SupportedMountOptions...)
+		mopts, data, err = consumeMountOptions(mopts, cgroupfs.SupportedMountOptions...)
 		if err != nil {
 			return "", nil, err
 		}
@@ -883,7 +941,7 @@ func getMountNameAndOptions(spec *specs.Spec, conf *config.Config, m *mountInfo,
 		return "", nil, nil
 	}
 
-	opts := ParseMountOptions(m.mount.Options)
+	opts := ParseMountOptions(mopts)
 	opts.GetFilesystemOptions = vfs.GetFilesystemOptions{
 		Data:          strings.Join(data, ","),
 		InternalData:  internalData,
@@ -926,6 +984,21 @@ func parseKeyValue(s string) (string, string, bool) {
 		return "", "", false
 	}
 	return strings.TrimSpace(tokens[0]), strings.TrimSpace(tokens[1]), true
+}
+
+func createPrivateMemoryFile(file *os.File) (*pgalloc.MemoryFile, error) {
+	mfOpts := pgalloc.MemoryFileOpts{
+		// Private memory files are usually backed by files on disk. Ideally we
+		// would confirm with fstatfs(2) but that is prohibited by seccomp.
+		DiskBackedFile: true,
+		// Disk backed files need to be decommited on destroy to release disk space.
+		DecommitOnDestroy: true,
+		// sentry's seccomp filters don't allow the mmap(2) syscalls that
+		// pgalloc.IMAWorkAroundForMemFile() uses. Users of private memory files
+		// are expected to have performed the work around outside the sandbox.
+		DisableIMAWorkAround: true,
+	}
+	return pgalloc.NewMemoryFile(file, mfOpts)
 }
 
 // mountTmp mounts an internal tmpfs at '/tmp' if it's safe to do so.
@@ -1022,13 +1095,114 @@ func (c *containerMounter) getSharedMount(ctx context.Context, spec *specs.Spec,
 	return sharedMount, nil
 }
 
+// mountCgroupMounts mounts the cgroups which are shared across all containers.
+// Postcondition: Initialized k.cgroupMounts on success.
+func (l *Loader) mountCgroupMounts(conf *config.Config, creds *auth.Credentials) error {
+	ctx := l.k.SupervisorContext()
+	for _, sopts := range kernel.CgroupCtrls {
+		mopts := &vfs.MountOptions{
+			GetFilesystemOptions: vfs.GetFilesystemOptions{
+				Data:          string(sopts),
+				InternalMount: true,
+			},
+		}
+		fs, root, err := l.k.VFS().NewFilesystem(ctx, creds, "cgroup", cgroupfs.Name, mopts)
+		if err != nil {
+			return err
+		}
+
+		mount := l.k.VFS().NewDisconnectedMount(fs, root, mopts)
+		// Private so that mounts created by containers do not appear
+		// in other container's cgroup paths.
+		l.k.VFS().SetMountPropagation(mount, linux.MS_PRIVATE, false)
+		l.k.AddCgroupMount(string(sopts), &kernel.CgroupMount{
+			Fs:    fs,
+			Root:  root,
+			Mount: mount,
+		})
+	}
+	log.Infof("created cgroup mounts for controllers %v", kernel.CgroupCtrls)
+	return nil
+}
+
+// mountCgroupSubmounts mounts all the cgroup controller submounts for the
+// container. The cgroup submounts are created under the root controller mount
+// with containerID as the directory name and then bind mounts this directory
+// inside the container's mount namespace.
+func (c *containerMounter) mountCgroupSubmounts(ctx context.Context, spec *specs.Spec, conf *config.Config, mns *vfs.MountNamespace, creds *auth.Credentials, submount *mountInfo) error {
+	root := mns.Root(ctx)
+	defer root.DecRef(ctx)
+
+	// Mount "/sys/fs/cgroup" in the container's mount namespace.
+	submount.mount.Type = tmpfs.Name
+	mnt, err := c.mountSubmount(ctx, spec, conf, mns, creds, submount)
+	if err != nil {
+		return err
+	}
+	if mnt != nil && mnt.ReadOnly() {
+		// Switch to ReadWrite while we setup submounts.
+		if err := c.k.VFS().SetMountReadOnly(mnt, false); err != nil {
+			return fmt.Errorf("failed to set mount at %q readwrite: %w", submount.mount.Destination, err)
+		}
+		// Restore back to ReadOnly at the end.
+		defer func() {
+			if err := c.k.VFS().SetMountReadOnly(mnt, true); err != nil {
+				panic(fmt.Sprintf("failed to restore mount at %q back to readonly: %v", submount.mount.Destination, err))
+			}
+		}()
+	}
+
+	// Mount all the cgroup controllers in the container's mount namespace.
+	mountCtx := vfs.WithRoot(vfs.WithMountNamespace(ctx, mns), root)
+	for _, ctrl := range kernel.CgroupCtrls {
+		ctrlName := string(ctrl)
+		cgroupMnt := c.k.GetCgroupMount(ctrlName)
+		if cgroupMnt == nil {
+			return fmt.Errorf("cgroup mount for controller %s not found", ctrlName)
+		}
+
+		cgroupMntVD := vfs.MakeVirtualDentry(cgroupMnt.Mount, cgroupMnt.Root)
+		sourcePop := vfs.PathOperation{
+			Root:  cgroupMntVD,
+			Start: cgroupMntVD,
+			// Use the containerID as the cgroup path.
+			Path: fspath.Parse(c.containerID),
+		}
+		if err := c.k.VFS().MkdirAt(mountCtx, creds, &sourcePop, &vfs.MkdirOptions{
+			Mode: 0755,
+		}); err != nil {
+			log.Infof("error in creating directory %v", err)
+			return err
+		}
+
+		// Bind mount the new cgroup directory into the container's mount namespace.
+		destination := "/sys/fs/cgroup/" + ctrlName
+		if err := c.k.VFS().MakeSyntheticMountpoint(mountCtx, destination, root, creds); err != nil {
+			// Log a warning, but attempt the mount anyway.
+			log.Warningf("Failed to create mount point %q: %v", destination, err)
+		}
+
+		target := &vfs.PathOperation{
+			Root:  root,
+			Start: root,
+			Path:  fspath.Parse(destination),
+		}
+		if err := c.k.VFS().BindAt(mountCtx, creds, &sourcePop, target, false); err != nil {
+			log.Infof("error in bind mounting %v", err)
+			return err
+		}
+	}
+	c.cgroupsMounted = true
+	return nil
+}
+
 // mountSharedMaster mounts the master of a volume that is shared among
 // containers in a pod.
 func (c *containerMounter) mountSharedMaster(ctx context.Context, spec *specs.Spec, conf *config.Config, mntInfo *mountInfo, creds *auth.Credentials) (*vfs.Mount, error) {
 	// Mount the master using the options from the hint (mount annotations).
 	origOpts := mntInfo.mount.Options
 	mntInfo.mount.Options = mntInfo.hint.Mount.Options
-	fsName, opts, err := getMountNameAndOptions(spec, conf, mntInfo, c.productName)
+	fsName, opts, err := getMountNameAndOptions(spec, conf, mntInfo, c.productName, c.containerName)
 	mntInfo.mount.Options = origOpts
 	if err != nil {
 		return nil, err
@@ -1093,8 +1267,22 @@ func (c *containerMounter) makeMountPoint(ctx context.Context, creds *auth.Crede
 // configureRestore returns an updated context.Context including filesystem
 // state used by restore defined by conf.
 func (c *containerMounter) configureRestore(ctx context.Context) (context.Context, error) {
-	fdmap := make(map[string]int)
-	fdmap["/"] = c.goferFDs.remove()
+	// Compare createMountNamespace(); rootfs always consumes a gofer FD and a
+	// filestore FD is consumed if the rootfs GoferMountConf indicates so.
+	fdmap := make(map[vfs.RestoreID]int)
+
+	rootKey := vfs.RestoreID{ContainerName: c.containerName, Path: "/"}
+	fdmap[rootKey] = c.goferFDs.remove()
+
+	mfmap := make(map[vfs.RestoreID]*pgalloc.MemoryFile)
+	if rootfsConf := c.goferMountConfs[0]; rootfsConf.IsFilestorePresent() {
+		mf, err := createPrivateMemoryFile(c.goferFilestoreFDs.removeAsFD().ReleaseToFile("overlay-filestore"))
+		if err != nil {
+			return ctx, fmt.Errorf("failed to create private memory file for mount rootfs: %w", err)
+		}
+		mfmap[rootKey] = mf
+	}
+	// prepareMounts() consumes the remaining FDs for submounts.
 	mounts, err := c.prepareMounts()
 	if err != nil {
 		return ctx, err
@@ -1102,10 +1290,19 @@ func (c *containerMounter) configureRestore(ctx context.Context) (context.Contex
 	for i := range mounts {
 		submount := &mounts[i]
 		if submount.goferFD != nil {
-			fdmap[submount.mount.Destination] = submount.goferFD.Release()
+			key := vfs.RestoreID{ContainerName: c.containerName, Path: submount.mount.Destination}
+			fdmap[key] = submount.goferFD.Release()
+		}
+		if submount.filestoreFD != nil {
+			mf, err := createPrivateMemoryFile(submount.filestoreFD.ReleaseToFile("overlay-filestore"))
+			if err != nil {
+				return ctx, fmt.Errorf("failed to create private memory file for mount %q: %w", submount.mount.Destination, err)
+			}
+			key := vfs.RestoreID{ContainerName: c.containerName, Path: submount.mount.Destination}
+			mfmap[key] = mf
 		}
 	}
-	return context.WithValue(ctx, vfs.CtxRestoreFilesystemFDMap, fdmap), nil
+	return context.WithValue(context.WithValue(ctx, vfs.CtxRestoreFilesystemFDMap, fdmap), vfs.CtxFilesystemMemoryFileMap, mfmap), nil
 }
 
 func createDeviceFiles(ctx context.Context, creds *auth.Credentials, info *containerInfo, vfsObj *vfs.VirtualFilesystem, root vfs.VirtualDentry) error {
@@ -1182,37 +1379,58 @@ func createDeviceFile(ctx context.Context, creds *auth.Credentials, info *contai
 	return dev.CreateDeviceFile(ctx, vfsObj, creds, root, devSpec.Path, major, minor, mode, devSpec.UID, devSpec.GID)
 }
 
+// registerTPUDevice registers a TPU device in vfsObj based on the given device ID.
+func registerTPUDevice(vfsObj *vfs.VirtualFilesystem, minor uint32, deviceID int64) error {
+	switch deviceID {
+	case tpu.TPUV4DeviceID, tpu.TPUV4liteDeviceID:
+		return accel.RegisterTPUDevice(vfsObj, minor, deviceID == tpu.TPUV4liteDeviceID)
+	case tpu.TPUV5eDeviceID:
+		return tpuproxy.RegisterTPUDevice(vfsObj, minor)
+	default:
+		return fmt.Errorf("unsupported TPU device with ID: 0x%x", deviceID)
+	}
+}
+
+// pathGlobToPathRegex is a map that points a TPU PCI path glob to its path regex.
+// TPU v4 devices are accessible via /sys/devices/pci0000:00/<pci_address>/accel/accel# on the host.
+// TPU v5 devices are accessible via at /sys/devices/pci0000:00/<pci_address>/vfio-dev/vfio# on the host.
+var pathGlobToPathRegex = map[string]string{
+	pciPathGlobTPUv4: `^/sys/devices/pci0000:00/\d+:\d+:\d+\.\d+/accel/accel(\d+)$`,
+	pciPathGlobTPUv5: `^/sys/devices/pci0000:00/\d+:\d+:\d+\.\d+/vfio-dev/vfio(\d+)$`,
+}
+
 func tpuProxyRegisterDevices(info *containerInfo, vfsObj *vfs.VirtualFilesystem) error {
 	if !specutils.TPUProxyIsEnabled(info.spec, info.conf) {
 		return nil
 	}
-	// At this point /sys/devices/pci0000:00/<pci_address>/accel/accel# contains
-	// all the TPU devices on the host. Enumerate them and register TPU devices.
-	pciAddrs, err := filepath.Glob("/sys/devices/pci0000:00/*")
-	if err != nil {
-		return fmt.Errorf("enumerating PCI device files: %w", err)
-	}
-	pciPathRegex := regexp.MustCompile(`^/sys/devices/pci0000:00/\d+:\d+:\d+\.\d+/accel/accel(\d+)$`)
-	for _, pciPath := range pciAddrs {
-		ms := pciPathRegex.FindStringSubmatch(pciPath)
-		if ms == nil {
-			continue
-		}
-		deviceNum, err := strconv.ParseUint(ms[1], 10, 32)
+	// Enumerate all potential PCI paths where TPU devices are available and register the found TPU devices.
+	for pciPathGlobal, pathRegex := range pathGlobToPathRegex {
+		pciAddrs, err := filepath.Glob(pciPathGlobal)
 		if err != nil {
-			return fmt.Errorf("parsing PCI device number: %w", err)
+			return fmt.Errorf("enumerating PCI device files: %w", err)
 		}
-		var deviceIDBytes []byte
-		if deviceIDBytes, err = os.ReadFile(path.Join(pciPath, "device")); err != nil {
-			return fmt.Errorf("reading PCI device ID: %w", err)
-		}
-		deviceIDStr := strings.Replace(string(deviceIDBytes), "0x", "", -1)
-		deviceID, err := strconv.ParseInt(strings.TrimSpace(deviceIDStr), 16, 64)
-		if err != nil {
-			return fmt.Errorf("parsing PCI device ID: %w", err)
-		}
-		if err := accel.RegisterTPUV4Device(vfsObj, uint32(deviceNum), deviceID == tpu.TPUV4liteDeviceID); err != nil {
-			return fmt.Errorf("registering accel driver: %w", err)
+		pciPathRegex := regexp.MustCompile(pathRegex)
+		for _, pciPath := range pciAddrs {
+			ms := pciPathRegex.FindStringSubmatch(pciPath)
+			if ms == nil {
+				continue
+			}
+			deviceNum, err := strconv.ParseUint(ms[1], 10, 32)
+			if err != nil {
+				return fmt.Errorf("parsing PCI device number: %w", err)
+			}
+			var deviceIDBytes []byte
+			if deviceIDBytes, err = os.ReadFile(path.Join(pciPath, "device/device")); err != nil {
+				return fmt.Errorf("reading PCI device ID: %w", err)
+			}
+			deviceIDStr := strings.Replace(string(deviceIDBytes), "0x", "", -1)
+			deviceID, err := strconv.ParseInt(strings.TrimSpace(deviceIDStr), 16, 64)
+			if err != nil {
+				return fmt.Errorf("parsing PCI device ID: %w", err)
+			}
+			if err := registerTPUDevice(vfsObj, uint32(deviceNum), deviceID); err != nil {
+				return fmt.Errorf("registering TPU driver: %w", err)
+			}
 		}
 	}
 	return nil

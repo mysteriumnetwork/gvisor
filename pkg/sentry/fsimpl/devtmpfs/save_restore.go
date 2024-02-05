@@ -1,4 +1,4 @@
-// Copyright 2022 The gVisor Authors.
+// Copyright 2020 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,19 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//go:build race
-// +build race
+package devtmpfs
 
-package filter
-
-import (
-	"golang.org/x/sys/unix"
-	"gvisor.dev/gvisor/pkg/seccomp"
-)
-
-func archInstrumentationFilters(f seccomp.SyscallRules) seccomp.SyscallRules {
-	f.Set(unix.SYS_OPEN, seccomp.MatchAll{})
-	// Used within glibc's malloc.
-	f.Set(unix.SYS_TIME, seccomp.MatchAll{})
-	return f
+// afterLoad is invoked by stateify.
+func (fst *FilesystemType) afterLoad() {
+	if fst.fs != nil {
+		// Ensure that we don't create another filesystem.
+		fst.initOnce.Do(func() {})
+	}
 }
