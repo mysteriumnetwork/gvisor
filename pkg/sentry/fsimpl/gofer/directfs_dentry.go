@@ -423,6 +423,14 @@ func (d *directfsDentry) getHostChild(name string) (*dentry, error) {
 	return d.fs.newDirectfsDentry(childFD)
 }
 
+func (d *directfsDentry) getXattr(name string, size uint64) (string, error) {
+	data := make([]byte, size)
+	if _, err := unix.Fgetxattr(d.controlFD, name, data); err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
 // getCreatedChild opens the newly created child, sets its uid/gid, constructs
 // a disconnected dentry and returns it.
 func (d *directfsDentry) getCreatedChild(name string, uid, gid int, isDir bool) (*dentry, error) {
@@ -530,6 +538,8 @@ func (d *directfsDentry) link(target *directfsDentry, name string) (*dentry, err
 	}
 	// Note that we don't need to set uid/gid for the new child. This is a hard
 	// link. The original file already has the right owner.
+	// TODO(gvisor.dev/issue/6739): Hard linked dentries should share the same
+	// inode fields.
 	return d.getCreatedChild(name, -1 /* uid */, -1 /* gid */, false /* isDir */)
 }
 

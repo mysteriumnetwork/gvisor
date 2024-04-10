@@ -153,7 +153,7 @@ type MemoryFile struct {
 	// operations. This allows MemoryFile.MapInternal to avoid locking in the
 	// common case where chunk mappings already exist.
 	mappingsMu mappingsMutex
-	mappings   atomic.Value
+	mappings   atomic.Pointer[[]uintptr]
 
 	// destroyed is set by Destroy to instruct the reclaimer goroutine to
 	// release resources and exit. destroyed is protected by mu.
@@ -183,6 +183,10 @@ type MemoryFile struct {
 	// notifications used to drive eviction. stopNotifyPressure is
 	// immutable.
 	stopNotifyPressure func()
+
+	// savable is true if this MemoryFile will be saved via SaveTo() during
+	// the kernel's SaveTo operation. savable is protected by mu.
+	savable bool
 }
 
 // MemoryFileOpts provides options to NewMemoryFile.
@@ -212,6 +216,10 @@ type MemoryFileOpts struct {
 
 	// DiskBackedFile indicates that the MemoryFile is backed by a file on disk.
 	DiskBackedFile bool
+
+	// RestoreID is an opaque string used to reassociate the MemoryFile with its
+	// replacement during restore.
+	RestoreID string
 }
 
 // DelayedEvictionType is the type of MemoryFileOpts.DelayedEviction.
@@ -347,7 +355,7 @@ func NewMemoryFile(file *os.File, opts MemoryFileOpts) (*MemoryFile, error) {
 		file:      file,
 		evictable: make(map[EvictableMemoryUser]*evictableMemoryUserInfo),
 	}
-	f.mappings.Store(make([]uintptr, 0))
+	f.mappings.Store(&[]uintptr{})
 	f.reclaimCond.L = &f.mu
 
 	if f.opts.DelayedEviction == DelayedEvictionEnabled && f.opts.UseHostMemcgPressure {
@@ -461,12 +469,12 @@ type AllocOpts struct {
 	// that will fill the allocated memory by invoking host system calls should
 	// pass AllocateOnly.
 	Mode AllocationMode
-	// If Reader is provided, the allocated memory is filled by calling
-	// ReadToBlocks() repeatedly until either length bytes are read or a non-nil
-	// error is returned. It returns the allocated memory, truncated down to the
-	// nearest page. If this is shorter than length bytes due to an error
-	// returned by ReadToBlocks(), it returns the partially filled fr and error.
-	Reader safemem.Reader
+	// If ReaderFunc is provided, the allocated memory is filled by calling it
+	// repeatedly until either length bytes are read or a non-nil error is
+	// returned. It returns the allocated memory, truncated down to the nearest
+	// page. If this is shorter than length bytes due to an error returned by
+	// ReaderFunc, it returns the partially filled fr and error.
+	ReaderFunc safemem.ReaderFunc
 }
 
 // Allocate returns a range of initially-zeroed pages of the given length with
@@ -510,7 +518,7 @@ func (f *MemoryFile) Allocate(length uint64, opts AllocOpts) (memmap.FileRange, 
 	default:
 		panic(fmt.Sprintf("unknown allocation mode: %d", opts.Mode))
 	}
-	if opts.Reader != nil {
+	if opts.ReaderFunc != nil {
 		if dsts.IsEmpty() {
 			dsts, err = f.MapInternal(fr, hostarch.Write)
 			if err != nil {
@@ -518,7 +526,7 @@ func (f *MemoryFile) Allocate(length uint64, opts AllocOpts) (memmap.FileRange, 
 				return memmap.FileRange{}, err
 			}
 		}
-		n, err := safemem.ReadFullToBlocks(opts.Reader, dsts)
+		n, err := safemem.ReadFullToBlocks(opts.ReaderFunc, dsts)
 		un := uint64(hostarch.Addr(n).RoundDown())
 		if un < length {
 			// Free unused memory and update fr to contain only the memory that is
@@ -563,10 +571,10 @@ func (f *MemoryFile) allocate(length uint64, opts *AllocOpts) (memmap.FileRange,
 		}
 		f.fileSize = newFileSize
 		f.mappingsMu.Lock()
-		oldMappings := f.mappings.Load().([]uintptr)
+		oldMappings := *f.mappings.Load()
 		newMappings := make([]uintptr, newFileSize>>chunkShift)
 		copy(newMappings, oldMappings)
-		f.mappings.Store(newMappings)
+		f.mappings.Store(&newMappings)
 		f.mappingsMu.Unlock()
 	}
 
@@ -958,7 +966,7 @@ func (f *MemoryFile) MapInternal(fr memmap.FileRange, at hostarch.AccessType) (s
 // forEachMappingSlice invokes fn on a sequence of byte slices that
 // collectively map all bytes in fr.
 func (f *MemoryFile) forEachMappingSlice(fr memmap.FileRange, fn func([]byte)) error {
-	mappings := f.mappings.Load().([]uintptr)
+	mappings := *f.mappings.Load()
 	for chunkStart := fr.Start &^ chunkMask; chunkStart < fr.End; chunkStart += chunkSize {
 		chunk := int(chunkStart >> chunkShift)
 		m := atomic.LoadUintptr(&mappings[chunk])
@@ -987,7 +995,7 @@ func (f *MemoryFile) getChunkMapping(chunk int) ([]uintptr, uintptr, error) {
 	defer f.mappingsMu.Unlock()
 	// Another thread may have replaced f.mappings altogether due to file
 	// expansion.
-	mappings := f.mappings.Load().([]uintptr)
+	mappings := *f.mappings.Load()
 	// Another thread may have already mapped the chunk.
 	if m := mappings[chunk]; m != 0 {
 		return mappings, m, nil
@@ -1391,7 +1399,7 @@ func (f *MemoryFile) runReclaim() {
 	f.file = nil
 	f.mappingsMu.Lock()
 	defer f.mappingsMu.Unlock()
-	mappings := f.mappings.Load().([]uintptr)
+	mappings := *f.mappings.Load()
 	for i, m := range mappings {
 		if m != 0 {
 			_, _, errno := unix.Syscall(unix.SYS_MUNMAP, m, chunkSize, 0)
@@ -1400,8 +1408,8 @@ func (f *MemoryFile) runReclaim() {
 			}
 		}
 	}
-	// Similarly, invalidate f.mappings. (atomic.Value.Store(nil) panics.)
-	f.mappings.Store([]uintptr{})
+	// Similarly, invalidate f.mappings
+	f.mappings.Store(nil)
 	f.mu.Unlock()
 
 	// This must be called without holding f.mu to avoid circular lock

@@ -1,4 +1,4 @@
-// Copyright 2018 The gVisor Authors.
+// Copyright 2024 The gVisor Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -12,8 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package stack
+package linux
 
-// StackFromEnv is the global stack created in restore run.
-// FIXME(b/36201077)
-var StackFromEnv *Stack
+import "unsafe"
+
+// Size returns the number of bytes for a VFIOIrqSet object.
+func (vfioIrqSet VFIOIrqSet) Size() uint64 {
+	return uint64(unsafe.Sizeof(vfioIrqSet))
+}

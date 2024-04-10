@@ -306,8 +306,7 @@ func (d *dentry) getXattrImpl(ctx context.Context, opts *vfs.GetXattrOptions) (s
 	case *lisafsDentry:
 		return dt.controlFD.GetXattr(ctx, opts.Name, opts.Size)
 	case *directfsDentry:
-		// Consistent with runsc/fsgofer.
-		return "", linuxerr.EOPNOTSUPP
+		return dt.getXattr(opts.Name, opts.Size)
 	default:
 		panic("unknown dentry implementation")
 	}
@@ -353,6 +352,7 @@ func (d *dentry) mknod(ctx context.Context, name string, creds *auth.Credentials
 
 // Preconditions:
 //   - !d.isSynthetic().
+//   - !target.isSynthetic().
 //   - d.fs.renameMu must be locked.
 func (d *dentry) link(ctx context.Context, target *dentry, name string) (*dentry, error) {
 	switch dt := d.impl.(type) {

@@ -647,6 +647,11 @@ func (s *Sandbox) connError(err error) error {
 // createSandboxProcess starts the sandbox as a subprocess by running the "boot"
 // command, passing in the bundle dir.
 func (s *Sandbox) createSandboxProcess(conf *config.Config, args *Args, startSyncFile *os.File) error {
+	// Ensure we don't leak FDs to the sandbox process.
+	if err := SetCloExeOnAllFDs(); err != nil {
+		return fmt.Errorf("setting CLOEXEC on all FDs: %w", err)
+	}
+
 	donations := donation.Agency{}
 	defer donations.Close()
 
@@ -1258,6 +1263,7 @@ func (s *Sandbox) Checkpoint(cid string, f *os.File, options statefile.Options) 
 		FilePayload: urpc.FilePayload{
 			Files: []*os.File{f},
 		},
+		Resume: options.Resume,
 	}
 
 	if err := s.call(boot.ContMgrCheckpoint, &opt, nil); err != nil {
@@ -1462,7 +1468,7 @@ func (s *Sandbox) waitForStopped() error {
 		return nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	b := backoff.WithContext(backoff.NewConstantBackOff(100*time.Millisecond), ctx)
 	op := func() error {
@@ -1702,4 +1708,52 @@ func (s *Sandbox) Mount(cid, fstype, src, dest string) error {
 		FilePayload: urpc.FilePayload{Files: files},
 	}
 	return s.call(boot.ContMgrMount, &args, nil)
+}
+
+func setCloExeOnAllFDs() error {
+	f, err := os.Open("/proc/self/fd")
+	if err != nil {
+		return fmt.Errorf("failed to open /proc/self/fd: %w", err)
+
+	}
+	defer f.Close()
+	for {
+		dents, err := f.Readdirnames(256)
+		if err == io.EOF {
+			break
+		} else if err != nil {
+			return fmt.Errorf("failed to read /proc/self/fd: %w", err)
+		}
+		for _, dent := range dents {
+			fd, err := strconv.Atoi(dent)
+			if err != nil {
+				return fmt.Errorf("failed to convert /proc/self/fd entry %q to int: %w", dent, err)
+			}
+			if fd == int(f.Fd()) {
+				continue
+			}
+			flags, _, errno := unix.RawSyscall(unix.SYS_FCNTL, uintptr(fd), unix.F_GETFD, 0)
+			if errno != 0 {
+				return fmt.Errorf("error getting descriptor flags: %w", errno)
+			}
+			if flags&unix.FD_CLOEXEC != 0 {
+				continue
+			}
+			flags |= unix.FD_CLOEXEC
+			if _, _, errno := unix.RawSyscall(unix.SYS_FCNTL, uintptr(fd), unix.F_SETFD, flags); errno != 0 {
+				return fmt.Errorf("error setting CLOEXEC: %w", errno)
+			}
+		}
+	}
+	return nil
+}
+
+var setCloseExecOnce sync.Once
+
+// SetCloExeOnAllFDs sets CLOEXEC on all FDs in /proc/self/fd. This avoids
+// leaking inherited FDs from the parent (caller) to subprocesses created.
+func SetCloExeOnAllFDs() (retErr error) {
+	// Sufficient to do this only once per runsc invocation. Avoid double work.
+	setCloseExecOnce.Do(func() { retErr = setCloExeOnAllFDs() })
+	return
 }

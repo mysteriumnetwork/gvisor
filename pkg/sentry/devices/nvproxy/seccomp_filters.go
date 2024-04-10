@@ -52,6 +52,10 @@ func Filters() seccomp.SyscallRules {
 			},
 			seccomp.PerArg{
 				seccomp.NonNegativeFD{},
+				seccomp.EqualTo(frontendIoctlCmd(nvgpu.NV_ESC_WAIT_OPEN_COMPLETE, nvgpu.SizeofIoctlWaitOpenComplete)),
+			},
+			seccomp.PerArg{
+				seccomp.NonNegativeFD{},
 				seccomp.EqualTo(frontendIoctlCmd(nvgpu.NV_ESC_RM_ALLOC_MEMORY, nvgpu.SizeofIoctlNVOS02ParametersWithFD)),
 			},
 			seccomp.PerArg{
@@ -66,15 +70,9 @@ func Filters() seccomp.SyscallRules {
 				seccomp.NonNegativeFD{},
 				seccomp.EqualTo(frontendIoctlCmd(nvgpu.NV_ESC_RM_ALLOC, nvgpu.SizeofNVOS21Parameters)),
 			},
-			// Note that we don't need to add one for NVOS21ParametersV535, because
-			// SizeofNVOS21ParametersV535 == SizeofNVOS21Parameters. We test this.
 			seccomp.PerArg{
 				seccomp.NonNegativeFD{},
 				seccomp.EqualTo(frontendIoctlCmd(nvgpu.NV_ESC_RM_ALLOC, nvgpu.SizeofNVOS64Parameters)),
-			},
-			seccomp.PerArg{
-				seccomp.NonNegativeFD{},
-				seccomp.EqualTo(frontendIoctlCmd(nvgpu.NV_ESC_RM_ALLOC, nvgpu.SizeofNVOS64ParametersV535)),
 			},
 			seccomp.PerArg{
 				seccomp.NonNegativeFD{},
@@ -155,6 +153,10 @@ func Filters() seccomp.SyscallRules {
 			seccomp.PerArg{
 				seccomp.NonNegativeFD{},
 				seccomp.EqualTo(nvgpu.UVM_PAGEABLE_MEM_ACCESS),
+			},
+			seccomp.PerArg{
+				seccomp.NonNegativeFD{},
+				seccomp.EqualTo(nvgpu.UVM_SET_PREFERRED_LOCATION),
 			},
 			seccomp.PerArg{
 				seccomp.NonNegativeFD{},

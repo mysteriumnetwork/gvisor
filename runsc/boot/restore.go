@@ -18,8 +18,11 @@ import (
 	"fmt"
 	"os"
 
+	"gvisor.dev/gvisor/pkg/context"
+	"gvisor.dev/gvisor/pkg/sentry/fsimpl/host"
 	"gvisor.dev/gvisor/pkg/sentry/inet"
 	"gvisor.dev/gvisor/pkg/sentry/kernel"
+	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
 	"gvisor.dev/gvisor/pkg/sentry/socket/hostinet"
 	"gvisor.dev/gvisor/pkg/sentry/socket/netstack"
 	"gvisor.dev/gvisor/pkg/sentry/state"
@@ -36,32 +39,31 @@ type restorer struct {
 	deviceFile *os.File
 }
 
-func createNetworkNamespaceForRestore(l *Loader) (*inet.Namespace, error) {
+func createNetworkNamespaceForRestore(l *Loader) (*stack.Stack, *inet.Namespace, error) {
 	creds := getRootCredentials(l.root.spec, l.root.conf, nil /* UserNamespace */)
 	if creds == nil {
-		return nil, fmt.Errorf("getting root credentials")
+		return nil, nil, fmt.Errorf("getting root credentials")
 	}
 
 	// Save the current network stack to slap on top of the one that was restored.
 	curNetwork := l.k.RootNetworkNamespace().Stack()
 	eps, ok := curNetwork.(*netstack.Stack)
 	if !ok {
-		return inet.NewRootNamespace(hostinet.NewStack(), nil, creds.UserNamespace), nil
+		return nil, inet.NewRootNamespace(hostinet.NewStack(), nil, creds.UserNamespace), nil
 	}
 
-	stack.StackFromEnv = eps.Stack // FIXME(b/36201077)
 	creator := &sandboxNetstackCreator{
 		clock:                    l.k.Timekeeper(),
 		uniqueID:                 l.k,
 		allowPacketEndpointWrite: l.root.conf.AllowPacketEndpointWrite,
 	}
-	return inet.NewRootNamespace(curNetwork, creator, creds.UserNamespace), nil
+	return eps.Stack, inet.NewRootNamespace(curNetwork, creator, creds.UserNamespace), nil
 }
 
 func (r *restorer) restore(l *Loader) error {
 	// Create a new root network namespace with the network stack of the
-	// old kernel to preserve the exisiting network configuration.
-	netns, err := createNetworkNamespaceForRestore(l)
+	// old kernel to preserve the existing network configuration.
+	oldStack, netns, err := createNetworkNamespaceForRestore(l)
 	if err != nil {
 		return fmt.Errorf("creating network: %w", err)
 	}
@@ -75,6 +77,9 @@ func (r *restorer) restore(l *Loader) error {
 	if err != nil {
 		return fmt.Errorf("creating platform: %v", err)
 	}
+
+	// Start the old watchdog before replacing it with a new one below.
+	l.watchdog.Start()
 
 	// Release the kernel and replace it with a new one that will be restored into.
 	if l.k != nil {
@@ -104,12 +109,28 @@ func (r *restorer) restore(l *Loader) error {
 
 	// Set up the restore environment.
 	ctx := l.k.SupervisorContext()
+	if oldStack != nil {
+		ctx = context.WithValue(ctx, stack.CtxRestoreStack, oldStack)
+	}
+
 	// TODO(b/298078576): Need to process hints here probably
 	mntr := newContainerMounter(&l.root, l.k, l.mountHints, l.sharedMounts, l.productName, l.sandboxID)
-	ctx, err = mntr.configureRestore(ctx)
-	if err != nil {
+
+	fdmap := make(map[vfs.RestoreID]int)
+	mfmap := make(map[string]*pgalloc.MemoryFile)
+	if err := mntr.configureRestore(fdmap, mfmap); err != nil {
 		return fmt.Errorf("configuring filesystem restore: %v", err)
 	}
+	for appFD, fd := range r.container.stdioFDs {
+		key := host.MakeRestoreID(r.container.containerName, appFD)
+		fdmap[key] = fd.Release()
+	}
+	for _, customFD := range r.container.passFDs {
+		key := host.MakeRestoreID(r.container.containerName, customFD.guest)
+		fdmap[key] = customFD.host.FD()
+	}
+	ctx = context.WithValue(ctx, vfs.CtxRestoreFilesystemFDMap, fdmap)
+	ctx = context.WithValue(ctx, pgalloc.CtxMemoryFileMap, mfmap)
 
 	// Load the state.
 	loadOpts := state.LoadOpts{Source: r.stateFile}

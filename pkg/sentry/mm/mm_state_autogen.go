@@ -3,6 +3,8 @@
 package mm
 
 import (
+	"context"
+
 	"gvisor.dev/gvisor/pkg/state"
 )
 
@@ -24,10 +26,10 @@ func (a *aioManager) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(0, &a.contexts)
 }
 
-func (a *aioManager) afterLoad() {}
+func (a *aioManager) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (a *aioManager) StateLoad(stateSourceObject state.Source) {
+func (a *aioManager) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &a.contexts)
 }
 
@@ -51,19 +53,19 @@ func (i *ioResult) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(1, &i.ioEntry)
 }
 
-func (i *ioResult) afterLoad() {}
+func (i *ioResult) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (i *ioResult) StateLoad(stateSourceObject state.Source) {
+func (i *ioResult) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &i.data)
 	stateSourceObject.Load(1, &i.ioEntry)
 }
 
-func (ctx *AIOContext) StateTypeName() string {
+func (aio *AIOContext) StateTypeName() string {
 	return "pkg/sentry/mm.AIOContext"
 }
 
-func (ctx *AIOContext) StateFields() []string {
+func (aio *AIOContext) StateFields() []string {
 	return []string{
 		"results",
 		"maxOutstanding",
@@ -71,25 +73,25 @@ func (ctx *AIOContext) StateFields() []string {
 	}
 }
 
-func (ctx *AIOContext) beforeSave() {}
+func (aio *AIOContext) beforeSave() {}
 
 // +checklocksignore
-func (ctx *AIOContext) StateSave(stateSinkObject state.Sink) {
-	ctx.beforeSave()
-	if !state.IsZeroValue(&ctx.dead) {
-		state.Failf("dead is %#v, expected zero", &ctx.dead)
+func (aio *AIOContext) StateSave(stateSinkObject state.Sink) {
+	aio.beforeSave()
+	if !state.IsZeroValue(&aio.dead) {
+		state.Failf("dead is %#v, expected zero", &aio.dead)
 	}
-	stateSinkObject.Save(0, &ctx.results)
-	stateSinkObject.Save(1, &ctx.maxOutstanding)
-	stateSinkObject.Save(2, &ctx.outstanding)
+	stateSinkObject.Save(0, &aio.results)
+	stateSinkObject.Save(1, &aio.maxOutstanding)
+	stateSinkObject.Save(2, &aio.outstanding)
 }
 
 // +checklocksignore
-func (ctx *AIOContext) StateLoad(stateSourceObject state.Source) {
-	stateSourceObject.Load(0, &ctx.results)
-	stateSourceObject.Load(1, &ctx.maxOutstanding)
-	stateSourceObject.Load(2, &ctx.outstanding)
-	stateSourceObject.AfterLoad(ctx.afterLoad)
+func (aio *AIOContext) StateLoad(ctx context.Context, stateSourceObject state.Source) {
+	stateSourceObject.Load(0, &aio.results)
+	stateSourceObject.Load(1, &aio.maxOutstanding)
+	stateSourceObject.Load(2, &aio.outstanding)
+	stateSourceObject.AfterLoad(func() { aio.afterLoad(ctx) })
 }
 
 func (m *aioMappable) StateTypeName() string {
@@ -99,7 +101,6 @@ func (m *aioMappable) StateTypeName() string {
 func (m *aioMappable) StateFields() []string {
 	return []string{
 		"aioMappableRefs",
-		"mfp",
 		"fr",
 	}
 }
@@ -110,17 +111,14 @@ func (m *aioMappable) beforeSave() {}
 func (m *aioMappable) StateSave(stateSinkObject state.Sink) {
 	m.beforeSave()
 	stateSinkObject.Save(0, &m.aioMappableRefs)
-	stateSinkObject.Save(1, &m.mfp)
-	stateSinkObject.Save(2, &m.fr)
+	stateSinkObject.Save(1, &m.fr)
 }
 
-func (m *aioMappable) afterLoad() {}
-
 // +checklocksignore
-func (m *aioMappable) StateLoad(stateSourceObject state.Source) {
+func (m *aioMappable) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &m.aioMappableRefs)
-	stateSourceObject.Load(1, &m.mfp)
-	stateSourceObject.Load(2, &m.fr)
+	stateSourceObject.Load(1, &m.fr)
+	stateSourceObject.AfterLoad(func() { m.afterLoad(ctx) })
 }
 
 func (r *aioMappableRefs) StateTypeName() string {
@@ -142,9 +140,9 @@ func (r *aioMappableRefs) StateSave(stateSinkObject state.Sink) {
 }
 
 // +checklocksignore
-func (r *aioMappableRefs) StateLoad(stateSourceObject state.Source) {
+func (r *aioMappableRefs) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &r.refCount)
-	stateSourceObject.AfterLoad(r.afterLoad)
+	stateSourceObject.AfterLoad(func() { r.afterLoad(ctx) })
 }
 
 func (l *ioList) StateTypeName() string {
@@ -167,10 +165,10 @@ func (l *ioList) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(1, &l.tail)
 }
 
-func (l *ioList) afterLoad() {}
+func (l *ioList) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (l *ioList) StateLoad(stateSourceObject state.Source) {
+func (l *ioList) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &l.head)
 	stateSourceObject.Load(1, &l.tail)
 }
@@ -195,10 +193,10 @@ func (e *ioEntry) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(1, &e.prev)
 }
 
-func (e *ioEntry) afterLoad() {}
+func (e *ioEntry) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (e *ioEntry) StateLoad(stateSourceObject state.Source) {
+func (e *ioEntry) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &e.next)
 	stateSourceObject.Load(1, &e.prev)
 }
@@ -210,7 +208,6 @@ func (mm *MemoryManager) StateTypeName() string {
 func (mm *MemoryManager) StateFields() []string {
 	return []string{
 		"p",
-		"mfp",
 		"layout",
 		"users",
 		"vmas",
@@ -235,6 +232,8 @@ func (mm *MemoryManager) StateFields() []string {
 	}
 }
 
+func (mm *MemoryManager) beforeSave() {}
+
 // +checklocksignore
 func (mm *MemoryManager) StateSave(stateSinkObject state.Sink) {
 	mm.beforeSave()
@@ -245,56 +244,54 @@ func (mm *MemoryManager) StateSave(stateSinkObject state.Sink) {
 		state.Failf("captureInvalidations is %#v, expected zero", &mm.captureInvalidations)
 	}
 	stateSinkObject.Save(0, &mm.p)
-	stateSinkObject.Save(1, &mm.mfp)
-	stateSinkObject.Save(2, &mm.layout)
-	stateSinkObject.Save(3, &mm.users)
-	stateSinkObject.Save(4, &mm.vmas)
-	stateSinkObject.Save(5, &mm.brk)
-	stateSinkObject.Save(6, &mm.usageAS)
-	stateSinkObject.Save(7, &mm.lockedAS)
-	stateSinkObject.Save(8, &mm.dataAS)
-	stateSinkObject.Save(9, &mm.defMLockMode)
-	stateSinkObject.Save(10, &mm.pmas)
-	stateSinkObject.Save(11, &mm.curRSS)
-	stateSinkObject.Save(12, &mm.maxRSS)
-	stateSinkObject.Save(13, &mm.dumpability)
-	stateSinkObject.Save(14, &mm.argv)
-	stateSinkObject.Save(15, &mm.envv)
-	stateSinkObject.Save(16, &mm.auxv)
-	stateSinkObject.Save(17, &mm.executable)
-	stateSinkObject.Save(18, &mm.aioManager)
-	stateSinkObject.Save(19, &mm.sleepForActivation)
-	stateSinkObject.Save(20, &mm.vdsoSigReturnAddr)
-	stateSinkObject.Save(21, &mm.membarrierPrivateEnabled)
-	stateSinkObject.Save(22, &mm.membarrierRSeqEnabled)
+	stateSinkObject.Save(1, &mm.layout)
+	stateSinkObject.Save(2, &mm.users)
+	stateSinkObject.Save(3, &mm.vmas)
+	stateSinkObject.Save(4, &mm.brk)
+	stateSinkObject.Save(5, &mm.usageAS)
+	stateSinkObject.Save(6, &mm.lockedAS)
+	stateSinkObject.Save(7, &mm.dataAS)
+	stateSinkObject.Save(8, &mm.defMLockMode)
+	stateSinkObject.Save(9, &mm.pmas)
+	stateSinkObject.Save(10, &mm.curRSS)
+	stateSinkObject.Save(11, &mm.maxRSS)
+	stateSinkObject.Save(12, &mm.dumpability)
+	stateSinkObject.Save(13, &mm.argv)
+	stateSinkObject.Save(14, &mm.envv)
+	stateSinkObject.Save(15, &mm.auxv)
+	stateSinkObject.Save(16, &mm.executable)
+	stateSinkObject.Save(17, &mm.aioManager)
+	stateSinkObject.Save(18, &mm.sleepForActivation)
+	stateSinkObject.Save(19, &mm.vdsoSigReturnAddr)
+	stateSinkObject.Save(20, &mm.membarrierPrivateEnabled)
+	stateSinkObject.Save(21, &mm.membarrierRSeqEnabled)
 }
 
 // +checklocksignore
-func (mm *MemoryManager) StateLoad(stateSourceObject state.Source) {
+func (mm *MemoryManager) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &mm.p)
-	stateSourceObject.Load(1, &mm.mfp)
-	stateSourceObject.Load(2, &mm.layout)
-	stateSourceObject.Load(3, &mm.users)
-	stateSourceObject.Load(4, &mm.vmas)
-	stateSourceObject.Load(5, &mm.brk)
-	stateSourceObject.Load(6, &mm.usageAS)
-	stateSourceObject.Load(7, &mm.lockedAS)
-	stateSourceObject.Load(8, &mm.dataAS)
-	stateSourceObject.Load(9, &mm.defMLockMode)
-	stateSourceObject.Load(10, &mm.pmas)
-	stateSourceObject.Load(11, &mm.curRSS)
-	stateSourceObject.Load(12, &mm.maxRSS)
-	stateSourceObject.Load(13, &mm.dumpability)
-	stateSourceObject.Load(14, &mm.argv)
-	stateSourceObject.Load(15, &mm.envv)
-	stateSourceObject.Load(16, &mm.auxv)
-	stateSourceObject.Load(17, &mm.executable)
-	stateSourceObject.Load(18, &mm.aioManager)
-	stateSourceObject.Load(19, &mm.sleepForActivation)
-	stateSourceObject.Load(20, &mm.vdsoSigReturnAddr)
-	stateSourceObject.Load(21, &mm.membarrierPrivateEnabled)
-	stateSourceObject.Load(22, &mm.membarrierRSeqEnabled)
-	stateSourceObject.AfterLoad(mm.afterLoad)
+	stateSourceObject.Load(1, &mm.layout)
+	stateSourceObject.Load(2, &mm.users)
+	stateSourceObject.Load(3, &mm.vmas)
+	stateSourceObject.Load(4, &mm.brk)
+	stateSourceObject.Load(5, &mm.usageAS)
+	stateSourceObject.Load(6, &mm.lockedAS)
+	stateSourceObject.Load(7, &mm.dataAS)
+	stateSourceObject.Load(8, &mm.defMLockMode)
+	stateSourceObject.Load(9, &mm.pmas)
+	stateSourceObject.Load(10, &mm.curRSS)
+	stateSourceObject.Load(11, &mm.maxRSS)
+	stateSourceObject.Load(12, &mm.dumpability)
+	stateSourceObject.Load(13, &mm.argv)
+	stateSourceObject.Load(14, &mm.envv)
+	stateSourceObject.Load(15, &mm.auxv)
+	stateSourceObject.Load(16, &mm.executable)
+	stateSourceObject.Load(17, &mm.aioManager)
+	stateSourceObject.Load(18, &mm.sleepForActivation)
+	stateSourceObject.Load(19, &mm.vdsoSigReturnAddr)
+	stateSourceObject.Load(20, &mm.membarrierPrivateEnabled)
+	stateSourceObject.Load(21, &mm.membarrierRSeqEnabled)
+	stateSourceObject.AfterLoad(func() { mm.afterLoad(ctx) })
 }
 
 func (v *vma) StateTypeName() string {
@@ -335,10 +332,10 @@ func (v *vma) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(9, &v.lastFault)
 }
 
-func (v *vma) afterLoad() {}
+func (v *vma) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (v *vma) StateLoad(stateSourceObject state.Source) {
+func (v *vma) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &v.mappable)
 	stateSourceObject.Load(1, &v.off)
 	stateSourceObject.Load(3, &v.dontfork)
@@ -348,7 +345,7 @@ func (v *vma) StateLoad(stateSourceObject state.Source) {
 	stateSourceObject.Load(7, &v.id)
 	stateSourceObject.Load(8, &v.hint)
 	stateSourceObject.Load(9, &v.lastFault)
-	stateSourceObject.LoadValue(2, new(int), func(y any) { v.loadRealPerms(y.(int)) })
+	stateSourceObject.LoadValue(2, new(int), func(y any) { v.loadRealPerms(ctx, y.(int)) })
 }
 
 func (p *pma) StateTypeName() string {
@@ -357,6 +354,7 @@ func (p *pma) StateTypeName() string {
 
 func (p *pma) StateFields() []string {
 	return []string{
+		"file",
 		"off",
 		"translatePerms",
 		"effectivePerms",
@@ -371,24 +369,28 @@ func (p *pma) beforeSave() {}
 // +checklocksignore
 func (p *pma) StateSave(stateSinkObject state.Sink) {
 	p.beforeSave()
-	stateSinkObject.Save(0, &p.off)
-	stateSinkObject.Save(1, &p.translatePerms)
-	stateSinkObject.Save(2, &p.effectivePerms)
-	stateSinkObject.Save(3, &p.maxPerms)
-	stateSinkObject.Save(4, &p.needCOW)
-	stateSinkObject.Save(5, &p.private)
+	var fileValue string
+	fileValue = p.saveFile()
+	stateSinkObject.SaveValue(0, fileValue)
+	stateSinkObject.Save(1, &p.off)
+	stateSinkObject.Save(2, &p.translatePerms)
+	stateSinkObject.Save(3, &p.effectivePerms)
+	stateSinkObject.Save(4, &p.maxPerms)
+	stateSinkObject.Save(5, &p.needCOW)
+	stateSinkObject.Save(6, &p.private)
 }
 
-func (p *pma) afterLoad() {}
+func (p *pma) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (p *pma) StateLoad(stateSourceObject state.Source) {
-	stateSourceObject.Load(0, &p.off)
-	stateSourceObject.Load(1, &p.translatePerms)
-	stateSourceObject.Load(2, &p.effectivePerms)
-	stateSourceObject.Load(3, &p.maxPerms)
-	stateSourceObject.Load(4, &p.needCOW)
-	stateSourceObject.Load(5, &p.private)
+func (p *pma) StateLoad(ctx context.Context, stateSourceObject state.Source) {
+	stateSourceObject.Load(1, &p.off)
+	stateSourceObject.Load(2, &p.translatePerms)
+	stateSourceObject.Load(3, &p.effectivePerms)
+	stateSourceObject.Load(4, &p.maxPerms)
+	stateSourceObject.Load(5, &p.needCOW)
+	stateSourceObject.Load(6, &p.private)
+	stateSourceObject.LoadValue(0, new(string), func(y any) { p.loadFile(ctx, y.(string)) })
 }
 
 func (s *pmaSet) StateTypeName() string {
@@ -411,11 +413,11 @@ func (s *pmaSet) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.SaveValue(0, rootValue)
 }
 
-func (s *pmaSet) afterLoad() {}
+func (s *pmaSet) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (s *pmaSet) StateLoad(stateSourceObject state.Source) {
-	stateSourceObject.LoadValue(0, new([]pmaFlatSegment), func(y any) { s.loadRoot(y.([]pmaFlatSegment)) })
+func (s *pmaSet) StateLoad(ctx context.Context, stateSourceObject state.Source) {
+	stateSourceObject.LoadValue(0, new([]pmaFlatSegment), func(y any) { s.loadRoot(ctx, y.([]pmaFlatSegment)) })
 }
 
 func (n *pmanode) StateTypeName() string {
@@ -450,10 +452,10 @@ func (n *pmanode) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(7, &n.children)
 }
 
-func (n *pmanode) afterLoad() {}
+func (n *pmanode) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (n *pmanode) StateLoad(stateSourceObject state.Source) {
+func (n *pmanode) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &n.nrSegments)
 	stateSourceObject.Load(1, &n.parent)
 	stateSourceObject.Load(2, &n.parentIndex)
@@ -486,10 +488,10 @@ func (p *pmaFlatSegment) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(2, &p.Value)
 }
 
-func (p *pmaFlatSegment) afterLoad() {}
+func (p *pmaFlatSegment) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (p *pmaFlatSegment) StateLoad(stateSourceObject state.Source) {
+func (p *pmaFlatSegment) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &p.Start)
 	stateSourceObject.Load(1, &p.End)
 	stateSourceObject.Load(2, &p.Value)
@@ -502,7 +504,6 @@ func (m *SpecialMappable) StateTypeName() string {
 func (m *SpecialMappable) StateFields() []string {
 	return []string{
 		"SpecialMappableRefs",
-		"mfp",
 		"fr",
 		"name",
 	}
@@ -514,19 +515,16 @@ func (m *SpecialMappable) beforeSave() {}
 func (m *SpecialMappable) StateSave(stateSinkObject state.Sink) {
 	m.beforeSave()
 	stateSinkObject.Save(0, &m.SpecialMappableRefs)
-	stateSinkObject.Save(1, &m.mfp)
-	stateSinkObject.Save(2, &m.fr)
-	stateSinkObject.Save(3, &m.name)
+	stateSinkObject.Save(1, &m.fr)
+	stateSinkObject.Save(2, &m.name)
 }
 
-func (m *SpecialMappable) afterLoad() {}
-
 // +checklocksignore
-func (m *SpecialMappable) StateLoad(stateSourceObject state.Source) {
+func (m *SpecialMappable) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &m.SpecialMappableRefs)
-	stateSourceObject.Load(1, &m.mfp)
-	stateSourceObject.Load(2, &m.fr)
-	stateSourceObject.Load(3, &m.name)
+	stateSourceObject.Load(1, &m.fr)
+	stateSourceObject.Load(2, &m.name)
+	stateSourceObject.AfterLoad(func() { m.afterLoad(ctx) })
 }
 
 func (r *SpecialMappableRefs) StateTypeName() string {
@@ -548,9 +546,9 @@ func (r *SpecialMappableRefs) StateSave(stateSinkObject state.Sink) {
 }
 
 // +checklocksignore
-func (r *SpecialMappableRefs) StateLoad(stateSourceObject state.Source) {
+func (r *SpecialMappableRefs) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &r.refCount)
-	stateSourceObject.AfterLoad(r.afterLoad)
+	stateSourceObject.AfterLoad(func() { r.afterLoad(ctx) })
 }
 
 func (s *vmaSet) StateTypeName() string {
@@ -573,11 +571,11 @@ func (s *vmaSet) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.SaveValue(0, rootValue)
 }
 
-func (s *vmaSet) afterLoad() {}
+func (s *vmaSet) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (s *vmaSet) StateLoad(stateSourceObject state.Source) {
-	stateSourceObject.LoadValue(0, new([]vmaFlatSegment), func(y any) { s.loadRoot(y.([]vmaFlatSegment)) })
+func (s *vmaSet) StateLoad(ctx context.Context, stateSourceObject state.Source) {
+	stateSourceObject.LoadValue(0, new([]vmaFlatSegment), func(y any) { s.loadRoot(ctx, y.([]vmaFlatSegment)) })
 }
 
 func (n *vmanode) StateTypeName() string {
@@ -612,10 +610,10 @@ func (n *vmanode) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(7, &n.children)
 }
 
-func (n *vmanode) afterLoad() {}
+func (n *vmanode) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (n *vmanode) StateLoad(stateSourceObject state.Source) {
+func (n *vmanode) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &n.nrSegments)
 	stateSourceObject.Load(1, &n.parent)
 	stateSourceObject.Load(2, &n.parentIndex)
@@ -648,10 +646,10 @@ func (v *vmaFlatSegment) StateSave(stateSinkObject state.Sink) {
 	stateSinkObject.Save(2, &v.Value)
 }
 
-func (v *vmaFlatSegment) afterLoad() {}
+func (v *vmaFlatSegment) afterLoad(context.Context) {}
 
 // +checklocksignore
-func (v *vmaFlatSegment) StateLoad(stateSourceObject state.Source) {
+func (v *vmaFlatSegment) StateLoad(ctx context.Context, stateSourceObject state.Source) {
 	stateSourceObject.Load(0, &v.Start)
 	stateSourceObject.Load(1, &v.End)
 	stateSourceObject.Load(2, &v.Value)

@@ -114,7 +114,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
 	flagSet.Bool("net-raw", false, "enable raw sockets. When false, raw sockets are disabled by removing CAP_NET_RAW from containers (`runsc exec` will still be able to utilize raw sockets). Raw sockets allow malicious containers to craft packets and potentially attack the network.")
 	flagSet.Bool("gso", true, "enable host segmentation offload if it is supported by a network device.")
 	flagSet.Bool("software-gso", true, "enable gVisor segmentation offload when host offload can't be enabled.")
-	flagSet.Duration("gvisor-gro", 0, "(e.g. \"20000ns\" or \"1ms\") sets gVisor's generic receive offload timeout. Zero bypasses GRO.")
+	flagSet.Bool("gvisor-gro", false, "enable gVisor generic receive offload")
 	flagSet.Bool("tx-checksum-offload", false, "enable TX checksum offload.")
 	flagSet.Bool("rx-checksum-offload", true, "enable RX checksum offload.")
 	flagSet.Var(queueingDisciplinePtr(QDiscFIFO), "qdisc", "specifies which queueing discipline to apply by default to the non loopback nics used by the sandbox.")
@@ -127,7 +127,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
 
 	// Flags that control sandbox runtime behavior: accelerator related.
 	flagSet.Bool("nvproxy", false, "EXPERIMENTAL: enable support for Nvidia GPUs")
-	flagSet.Bool("nvproxy-docker", false, "Expose GPUs to containers based on NVIDIA_VISIBLE_DEVICES, as requested by the container or set by `docker --gpus`. Allows containers to self-serve GPU access and thus disabled by default for security. libnvidia-container must be installed on the host. No effect unless --nvproxy is enabled.")
+	flagSet.Bool("nvproxy-docker", false, "DEPRECATED: use nvidia-container-runtime or `docker run --gpus` directly. Or manually add nvidia-container-runtime-hook as a prestart hook and set up NVIDIA_VISIBLE_DEVICES container environment variable.")
 	flagSet.Bool("tpuproxy", false, "EXPERIMENTAL: enable support for TPU device passthrough.")
 
 	// Test flags, not to be used outside tests, ever.
@@ -135,6 +135,7 @@ func RegisterFlags(flagSet *flag.FlagSet) {
 	flagSet.String("TESTONLY-test-name-env", "", "TEST ONLY; do not ever use! Used for automated tests to improve logging.")
 	flagSet.Bool("TESTONLY-allow-packet-endpoint-write", false, "TEST ONLY; do not ever use! Used for tests to allow writes on packet sockets.")
 	flagSet.Bool("TESTONLY-afs-syscall-panic", false, "TEST ONLY; do not ever use! Used for tests exercising gVisor panic reporting.")
+	flagSet.String("TESTONLY-autosave-image-path", "", "TEST ONLY; enable auto save for syscall tests and set path for state file.")
 }
 
 // overrideAllowlist lists all flags that can be changed using OCI

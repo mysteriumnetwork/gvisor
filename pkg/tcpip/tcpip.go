@@ -321,17 +321,24 @@ func (a Address) MatchingPrefix(b Address) uint8 {
 //
 // +stateify savable
 type AddressMask struct {
-	mask string
+	mask   [16]byte
+	length int
 }
 
 // MaskFrom returns a Mask based on str.
+//
+// MaskFrom may allocate, and so should not be in hot paths.
 func MaskFrom(str string) AddressMask {
-	return AddressMask{mask: str}
+	mask := AddressMask{length: len(str)}
+	copy(mask.mask[:], str)
+	return mask
 }
 
 // MaskFromBytes returns a Mask based on bs.
 func MaskFromBytes(bs []byte) AddressMask {
-	return AddressMask{mask: string(bs)}
+	mask := AddressMask{length: len(bs)}
+	copy(mask.mask[:], bs)
+	return mask
 }
 
 // String implements Stringer.
@@ -342,23 +349,23 @@ func (m AddressMask) String() string {
 // AsSlice returns a as a byte slice. Callers should be careful as it can
 // return a window into existing memory.
 func (m *AddressMask) AsSlice() []byte {
-	return []byte(m.mask)
+	return []byte(m.mask[:m.length])
 }
 
 // BitLen returns the length of the mask in bits.
 func (m AddressMask) BitLen() int {
-	return len(m.mask) * 8
+	return m.length * 8
 }
 
 // Len returns the length of the mask in bytes.
 func (m AddressMask) Len() int {
-	return len(m.mask)
+	return m.length
 }
 
 // Prefix returns the number of bits before the first host bit.
 func (m AddressMask) Prefix() int {
 	p := 0
-	for _, b := range []byte(m.mask) {
+	for _, b := range m.mask[:m.length] {
 		p += bits.LeadingZeros8(^b)
 	}
 	return p
@@ -2661,36 +2668,40 @@ func (a AddressWithPrefix) Subnet() Subnet {
 	addrLen := a.Address.length
 	if a.PrefixLen <= 0 {
 		return Subnet{
-			address: AddrFromSlice(bytes.Repeat([]byte{0}, addrLen)),
-			mask:    MaskFromBytes(bytes.Repeat([]byte{0}, addrLen)),
+			address: Address{length: addrLen},
+			mask:    AddressMask{length: addrLen},
 		}
 	}
 	if a.PrefixLen >= addrLen*8 {
-		return Subnet{
+		sub := Subnet{
 			address: a.Address,
-			mask:    MaskFromBytes(bytes.Repeat([]byte{0xff}, addrLen)),
+			mask:    AddressMask{length: addrLen},
 		}
+		for i := 0; i < addrLen; i++ {
+			sub.mask.mask[i] = 0xff
+		}
+		return sub
 	}
 
-	sa := make([]byte, addrLen)
-	sm := make([]byte, addrLen)
+	sa := Address{length: addrLen}
+	sm := AddressMask{length: addrLen}
 	n := uint(a.PrefixLen)
 	for i := 0; i < addrLen; i++ {
 		if n >= 8 {
-			sa[i] = a.Address.addr[i]
-			sm[i] = 0xff
+			sa.addr[i] = a.Address.addr[i]
+			sm.mask[i] = 0xff
 			n -= 8
 			continue
 		}
-		sm[i] = ^byte(0xff >> n)
-		sa[i] = a.Address.addr[i] & sm[i]
+		sm.mask[i] = ^byte(0xff >> n)
+		sa.addr[i] = a.Address.addr[i] & sm.mask[i]
 		n = 0
 	}
 
 	// For extra caution, call NewSubnet rather than directly creating the Subnet
 	// value. If that fails it indicates a serious bug in this code, so panic is
 	// in order.
-	s, err := NewSubnet(AddrFromSlice(sa), MaskFromBytes(sm))
+	s, err := NewSubnet(sa, sm)
 	if err != nil {
 		panic("invalid subnet: " + err.Error())
 	}

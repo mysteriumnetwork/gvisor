@@ -893,7 +893,7 @@ func (vfs *VirtualFilesystem) disconnectLocked(mnt *Mount) VirtualDentry {
 		delete(mnt.ns.mountpoints, vd.dentry)
 	}
 	vfs.mounts.removeSeqed(mnt)
-	mnt.loadKey(VirtualDentry{}) // Clear mnt.key.
+	mnt.setKey(VirtualDentry{}) // Clear mnt.key.
 	vfsmpmounts := vfs.mountpoints[vd.dentry]
 	delete(vfsmpmounts, mnt)
 	if len(vfsmpmounts) == 0 {
@@ -1532,7 +1532,7 @@ func manglePath(p string) string {
 	return r.Replace(p)
 }
 
-// superBlockOpts returns the super block options string for the the mount at
+// superBlockOpts returns the super block options string for the mount at
 // the given path.
 func superBlockOpts(mountPath string, mnt *Mount) string {
 	// Compose super block options by combining global mount flags with

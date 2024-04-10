@@ -15,6 +15,7 @@
 package vfs
 
 import (
+	goContext "context"
 	"fmt"
 	"sync/atomic"
 
@@ -107,8 +108,18 @@ func (vfs *VirtualFilesystem) saveMounts() []*Mount {
 // saveKey is called by stateify.
 func (mnt *Mount) saveKey() VirtualDentry { return mnt.getKey() }
 
+// saveMountPromises is called by stateify.
+func (vfs *VirtualFilesystem) saveMountPromises() map[VirtualDentry]*mountPromise {
+	m := make(map[VirtualDentry]*mountPromise)
+	vfs.mountPromises.Range(func(key any, val any) bool {
+		m[key.(VirtualDentry)] = val.(*mountPromise)
+		return true
+	})
+	return m
+}
+
 // loadMounts is called by stateify.
-func (vfs *VirtualFilesystem) loadMounts(mounts []*Mount) {
+func (vfs *VirtualFilesystem) loadMounts(_ goContext.Context, mounts []*Mount) {
 	if mounts == nil {
 		return
 	}
@@ -119,17 +130,24 @@ func (vfs *VirtualFilesystem) loadMounts(mounts []*Mount) {
 }
 
 // loadKey is called by stateify.
-func (mnt *Mount) loadKey(vd VirtualDentry) { mnt.setKey(vd) }
+func (mnt *Mount) loadKey(_ goContext.Context, vd VirtualDentry) { mnt.setKey(vd) }
+
+// loadMountPromises is called by stateify.
+func (vfs *VirtualFilesystem) loadMountPromises(_ goContext.Context, mps map[VirtualDentry]*mountPromise) {
+	for vd, mp := range mps {
+		vfs.mountPromises.Store(vd, mp)
+	}
+}
 
 // afterLoad is called by stateify.
-func (mnt *Mount) afterLoad() {
+func (mnt *Mount) afterLoad(goContext.Context) {
 	if mnt.refs.Load() != 0 {
 		refs.Register(mnt)
 	}
 }
 
 // afterLoad is called by stateify.
-func (epi *epollInterest) afterLoad() {
+func (epi *epollInterest) afterLoad(goContext.Context) {
 	// Mark all epollInterests as ready after restore so that the next call to
 	// EpollInstance.ReadEvents() rechecks their readiness.
 	epi.waiter.NotifyEvent(waiter.EventMaskFromLinux(epi.mask))

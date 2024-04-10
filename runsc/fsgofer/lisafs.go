@@ -69,8 +69,8 @@ var procSelfFD *rwfd.FD
 
 // OpenProcSelfFD opens the /proc/self/fd directory, which will be used to
 // reopen file descriptors.
-func OpenProcSelfFD() error {
-	d, err := unix.Open("/proc/self/fd", unix.O_RDONLY|unix.O_DIRECTORY, 0)
+func OpenProcSelfFD(path string) error {
+	d, err := unix.Open(path, unix.O_RDONLY|unix.O_DIRECTORY, 0)
 	if err != nil {
 		return fmt.Errorf("error opening /proc/self/fd: %v", err)
 	}
@@ -901,7 +901,9 @@ func (fd *controlFDLisa) Renamed() {
 
 // GetXattr implements lisafs.ControlFDImpl.GetXattr.
 func (fd *controlFDLisa) GetXattr(name string, size uint32, getValueBuf func(uint32) []byte) (uint16, error) {
-	return 0, unix.EOPNOTSUPP
+	data := getValueBuf(size)
+	xattrSize, err := unix.Fgetxattr(fd.hostFD, name, data)
+	return uint16(xattrSize), err
 }
 
 // SetXattr implements lisafs.ControlFDImpl.SetXattr.

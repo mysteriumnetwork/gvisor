@@ -18,6 +18,7 @@
 package cpuid
 
 import (
+	"context"
 	"fmt"
 	"io"
 )
@@ -56,7 +57,7 @@ func (fs *FeatureSet) saveFunction() Static {
 }
 
 // loadFunction saves the function as a static query.
-func (fs *FeatureSet) loadFunction(s Static) {
+func (fs *FeatureSet) loadFunction(_ context.Context, s Static) {
 	fs.Function = s
 }
 
@@ -401,9 +402,11 @@ func (fs FeatureSet) ExtendedStateSize() (size, align uint) {
 // AMXExtendedStateSize returns the number of bytes within the "extended state"
 // area that is used for AMX.
 func (fs FeatureSet) AMXExtendedStateSize() uint {
-	xcr0 := xgetbv(0)
-	if (xcr0 & XCR0AMXMask) != 0 {
-		return uint(amxTileCfgSize + amxTileDataSize)
+	if fs.UseXsave() {
+		xcr0 := xgetbv(0)
+		if (xcr0 & XCR0AMXMask) != 0 {
+			return uint(amxTileCfgSize + amxTileDataSize)
+		}
 	}
 	return 0
 }

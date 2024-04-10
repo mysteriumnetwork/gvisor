@@ -84,7 +84,7 @@ type TaskConfig struct {
 	// MountNamespace is the MountNamespace of the new task.
 	MountNamespace *vfs.MountNamespace
 
-	// RSeqAddr is a pointer to the the userspace linux.RSeq structure.
+	// RSeqAddr is a pointer to the userspace linux.RSeq structure.
 	RSeqAddr hostarch.Addr
 
 	// RSeqSignature is the signature that the rseq abort IP must be signed
@@ -176,8 +176,6 @@ func (ts *TaskSet) newTask(ctx context.Context, cfg *TaskConfig) (*Task, error) 
 	t.netns = cfg.NetworkNamespace
 	t.creds.Store(cfg.Credentials)
 	t.endStopCond.L = &t.tg.signalHandlers.mu
-	t.ptraceTracer.Store((*Task)(nil))
-	t.seccomp.Store((*taskSeccomp)(nil))
 	// We don't construct t.blockingTimer until Task.run(); see that function
 	// for justification.
 

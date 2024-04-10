@@ -142,8 +142,7 @@ type Kernel struct {
 	// All of the following fields are immutable unless otherwise specified.
 
 	// Platform is the platform that is used to execute tasks in the created
-	// Kernel. See comment on pgalloc.MemoryFileProvider for why Platform is
-	// embedded anonymously (the same issue applies).
+	// Kernel.
 	platform.Platform `state:"nosave"`
 
 	// mf provides application memory.
@@ -522,10 +521,10 @@ func (k *Kernel) Init(args InitKernelArgs) error {
 
 // +stateify savable
 type privateMemoryFileMetadata struct {
-	owners []vfs.RestoreID
+	owners []string
 }
 
-func savePrivateMFs(ctx context.Context, w wire.Writer, mfsToSave map[vfs.RestoreID]*pgalloc.MemoryFile) error {
+func savePrivateMFs(ctx context.Context, w wire.Writer, mfsToSave map[string]*pgalloc.MemoryFile) error {
 	var meta privateMemoryFileMetadata
 	// Generate the order in which private memory files are saved.
 	for fsID := range mfsToSave {
@@ -550,10 +549,7 @@ func loadPrivateMFs(ctx context.Context, r wire.Reader) error {
 	if _, err := state.Load(ctx, r, &meta); err != nil {
 		return err
 	}
-	var mfmap map[vfs.RestoreID]*pgalloc.MemoryFile
-	if mfmapv := ctx.Value(vfs.CtxFilesystemMemoryFileMap); mfmapv != nil {
-		mfmap = mfmapv.(map[vfs.RestoreID]*pgalloc.MemoryFile)
-	}
+	mfmap := pgalloc.MemoryFileMapFromContext(ctx)
 	// Ensure that it is consistent with CtxFilesystemMemoryFileMap.
 	if len(mfmap) != len(meta.owners) {
 		return fmt.Errorf("inconsistent private memory files on restore: savedMFOwners = %v, CtxFilesystemMemoryFileMap = %v", meta.owners, mfmap)
@@ -595,13 +591,18 @@ func (k *Kernel) SaveTo(ctx context.Context, w wire.Writer) error {
 	}
 
 	// Capture all private memory files.
-	mfsToSave := make(map[vfs.RestoreID]*pgalloc.MemoryFile)
-	vfsCtx := context.WithValue(ctx, vfs.CtxFilesystemMemoryFileMap, mfsToSave)
+	mfsToSave := make(map[string]*pgalloc.MemoryFile)
+	vfsCtx := context.WithValue(ctx, pgalloc.CtxMemoryFileMap, mfsToSave)
 	// Prepare filesystems for saving. This must be done after
 	// invalidateUnsavableMappings(), since dropping memory mappings may
 	// affect filesystem state (e.g. page cache reference counts).
 	if err := k.vfs.PrepareSave(vfsCtx); err != nil {
 		return err
+	}
+	// Mark all to-be-saved MemoryFiles as savable to inform kernel save below.
+	k.mf.MarkSavable()
+	for _, mf := range mfsToSave {
+		mf.MarkSavable()
 	}
 
 	// Save the CPUID FeatureSet before the rest of the kernel so we can
@@ -735,7 +736,7 @@ func (k *Kernel) LoadFrom(ctx context.Context, r wire.Reader, timeReady chan str
 	}
 
 	if net != nil {
-		net.Resume()
+		net.Restore()
 	}
 
 	if err := k.vfs.CompleteRestore(ctx, vfsOpts); err != nil {
@@ -892,8 +893,6 @@ func (ctx *createProcessContext) Value(key any) any {
 		return ctx.getMemoryCgroupID()
 	case pgalloc.CtxMemoryFile:
 		return ctx.kernel.mf
-	case pgalloc.CtxMemoryFileProvider:
-		return ctx.kernel
 	case platform.CtxPlatform:
 		return ctx.kernel
 	case uniqueid.CtxGlobalUniqueID:
@@ -1020,9 +1019,18 @@ func (k *Kernel) CreateProcess(args CreateProcessArgs) (*ThreadGroup, ThreadID, 
 	if se != nil {
 		return nil, 0, errors.New(se.String())
 	}
-
-	// Take a reference on the FDTable, which will be transferred to
-	// TaskSet.NewTask().
+	var capData auth.VfsCapData
+	if len(image.FileCaps()) != 0 {
+		var err error
+		capData, err = auth.VfsCapDataOf([]byte(image.FileCaps()))
+		if err != nil {
+			return nil, 0, err
+		}
+	}
+	creds, err := auth.CapsFromVfsCaps(capData, args.Credentials)
+	if err != nil {
+		return nil, 0, err
+	}
 	args.FDTable.IncRef()
 
 	// Create the task.
@@ -1032,7 +1040,7 @@ func (k *Kernel) CreateProcess(args CreateProcessArgs) (*ThreadGroup, ThreadID, 
 		TaskImage:        image,
 		FSContext:        fsContext,
 		FDTable:          args.FDTable,
-		Credentials:      args.Credentials,
+		Credentials:      creds,
 		NetworkNamespace: k.RootNetworkNamespace(),
 		AllowedCPUMask:   sched.NewFullCPUSet(k.applicationCores),
 		UTSNamespace:     args.UTSNamespace,
@@ -1531,7 +1539,7 @@ func (k *Kernel) SetMemoryFile(mf *pgalloc.MemoryFile) {
 	k.mf = mf
 }
 
-// MemoryFile implements pgalloc.MemoryFileProvider.MemoryFile.
+// MemoryFile returns the MemoryFile that provides application memory.
 func (k *Kernel) MemoryFile() *pgalloc.MemoryFile {
 	return k.mf
 }
@@ -1669,8 +1677,6 @@ func (ctx *supervisorContext) Value(key any) any {
 		return limits.NewLimitSet()
 	case pgalloc.CtxMemoryFile:
 		return ctx.Kernel.mf
-	case pgalloc.CtxMemoryFileProvider:
-		return ctx.Kernel
 	case platform.CtxPlatform:
 		return ctx.Kernel
 	case uniqueid.CtxGlobalUniqueID:

@@ -24,7 +24,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"time"
 
 	"gvisor.dev/gvisor/pkg/log"
 	"gvisor.dev/gvisor/pkg/refs"
@@ -122,13 +121,12 @@ type Config struct {
 	// HostGSO indicates that host segmentation offload is enabled.
 	HostGSO bool `flag:"gso"`
 
-	// GvisorGSO indicates that gVisor segmentation offload is enabled. The flag
+	// GVisorGSO indicates that gVisor segmentation offload is enabled. The flag
 	// retains its old name of "software" GSO for API consistency.
-	GvisorGSO bool `flag:"software-gso"`
+	GVisorGSO bool `flag:"software-gso"`
 
-	// GvisorGROTimeout sets gVisor's generic receive offload timeout. Zero
-	// bypasses GRO.
-	GvisorGROTimeout time.Duration `flag:"gvisor-gro"`
+	// GVisorGRO enables gVisor's generic receive offload.
+	GVisorGRO bool `flag:"gvisor-gro"`
 
 	// TXChecksumOffload indicates that TX Checksum Offload is enabled.
 	TXChecksumOffload bool `flag:"tx-checksum-offload"`
@@ -310,9 +308,9 @@ type Config struct {
 	// NVProxy enables support for Nvidia GPUs.
 	NVProxy bool `flag:"nvproxy"`
 
-	// NVProxyDocker exposes GPUs to containers based on the
-	// NVIDIA_VISIBLE_DEVICES container environment variable, as requested by
-	// containers or set by `docker --gpus`.
+	// NVProxyDocker is deprecated. Please use nvidia-container-runtime or
+	// `docker run --gpus` directly. For backward compatibility, this has the
+	// effect of injecting nvidia-container-runtime-hook as a prestart hook.
 	NVProxyDocker bool `flag:"nvproxy-docker"`
 
 	// TPUProxy enables support for TPUs.
@@ -348,6 +346,10 @@ type Config struct {
 	// ReproduceNftables attempts to scrape nftables routing rules if
 	// present, and reproduce them in the sandbox.
 	ReproduceNftables bool `flag:"reproduce-nftables"`
+
+	// TestOnlyAutosaveImagePath if not empty enables auto save for syscall tests
+	// and stores the directory path to the saved state file.
+	TestOnlyAutosaveImagePath string `flag:"TESTONLY-autosave-image-path"`
 }
 
 func (c *Config) validate() error {
@@ -400,9 +402,15 @@ func (c *Config) Log() {
 		st := obj.Type()
 		for i := 0; i < st.NumField(); i++ {
 			f := st.Field(i)
-			val := obj.Field(i).String()
-			if val == "" {
+			var val any
+			if strVal := obj.Field(i).String(); strVal == "" {
 				val = "(empty)"
+			} else if !f.IsExported() {
+				// Cannot convert to `interface{}` for non-exported fields,
+				// so just use `strVal`.
+				val = fmt.Sprintf("%s (unexported)", strVal)
+			} else {
+				val = obj.Field(i).Interface()
 			}
 			if flagName, hasFlag := f.Tag.Lookup("flag"); hasFlag {
 				log.Debugf("Config.%s (--%s): %v", f.Name, flagName, val)

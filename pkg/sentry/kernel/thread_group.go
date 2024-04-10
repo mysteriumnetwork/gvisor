@@ -15,6 +15,7 @@
 package kernel
 
 import (
+	goContext "context"
 	"sync/atomic"
 
 	"gvisor.dev/gvisor/pkg/abi/linux"
@@ -238,7 +239,7 @@ type ThreadGroup struct {
 	execed bool
 
 	// oldRSeqCritical is the thread group's old rseq critical region.
-	oldRSeqCritical atomic.Value `state:".(*OldRSeqCriticalRegion)"`
+	oldRSeqCritical atomic.Pointer[OldRSeqCriticalRegion] `state:".(*OldRSeqCriticalRegion)"`
 
 	// tty is the thread group's controlling terminal. If nil, there is no
 	// controlling terminal.
@@ -289,11 +290,11 @@ func (k *Kernel) NewThreadGroup(pidns *PIDNamespace, sh *SignalHandlers, termina
 
 // saveOldRSeqCritical is invoked by stateify.
 func (tg *ThreadGroup) saveOldRSeqCritical() *OldRSeqCriticalRegion {
-	return tg.oldRSeqCritical.Load().(*OldRSeqCriticalRegion)
+	return tg.oldRSeqCritical.Load()
 }
 
 // loadOldRSeqCritical is invoked by stateify.
-func (tg *ThreadGroup) loadOldRSeqCritical(r *OldRSeqCriticalRegion) {
+func (tg *ThreadGroup) loadOldRSeqCritical(_ goContext.Context, r *OldRSeqCriticalRegion) {
 	tg.oldRSeqCritical.Store(r)
 }
 

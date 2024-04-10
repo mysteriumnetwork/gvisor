@@ -20,6 +20,7 @@ import (
 	"sort"
 	"time"
 
+	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/sync"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/header"
@@ -88,7 +89,7 @@ type lossRecovery interface {
 // +stateify savable
 type sender struct {
 	stack.TCPSenderState
-	ep *endpoint
+	ep *Endpoint
 
 	// lr is the loss recovery algorithm used by the sender.
 	lr lossRecovery
@@ -151,6 +152,13 @@ type sender struct {
 	// segment after entering an RTO for the first time as described in
 	// RFC3522 Section 3.2.
 	retransmitTS uint32
+
+	// startCork start corking the segments.
+	startCork bool
+
+	// corkTimer is used to drain the segments which are held when TCP_CORK
+	// option is enabled.
+	corkTimer timer `state:"nosave"`
 }
 
 // rtt is a synchronization wrapper used to appease stateify. See the comment
@@ -164,7 +172,7 @@ type rtt struct {
 }
 
 // +checklocks:ep.mu
-func newSender(ep *endpoint, iss, irs seqnum.Value, sndWnd seqnum.Size, mss uint16, sndWndScale int) *sender {
+func newSender(ep *Endpoint, iss, irs seqnum.Value, sndWnd seqnum.Size, mss uint16, sndWndScale int) *sender {
 	// The sender MUST reduce the TCP data length to account for any IP or
 	// TCP options that it is including in the packets that it sends.
 	// See: https://tools.ietf.org/html/rfc6691#section-2
@@ -205,9 +213,10 @@ func newSender(ep *endpoint, iss, irs seqnum.Value, sndWnd seqnum.Size, mss uint
 		s.SndWndScale = uint8(sndWndScale)
 	}
 
-	s.resendTimer.init(s.ep.stack.Clock(), maybeFailTimerHandler(s.ep, s.retransmitTimerExpired))
+	s.resendTimer.init(s.ep.stack.Clock(), timerHandler(s.ep, s.retransmitTimerExpired))
 	s.reorderTimer.init(s.ep.stack.Clock(), timerHandler(s.ep, s.rc.reorderTimerExpired))
 	s.probeTimer.init(s.ep.stack.Clock(), timerHandler(s.ep, s.probeTimerExpired))
+	s.corkTimer.init(s.ep.stack.Clock(), timerHandler(s.ep, s.corkTimerExpired))
 
 	s.ep.AssertLockHeld(ep)
 	s.updateMaxPayloadSize(int(ep.route.MTU()), 0)
@@ -437,7 +446,7 @@ func (s *sender) resendSegment() {
 func (s *sender) retransmitTimerExpired() tcpip.Error {
 	// Check if the timer actually expired or if it's a spurious wake due
 	// to a previously orphaned runtime timer.
-	if s.resendTimer.isZero() || !s.resendTimer.checkExpiration() {
+	if s.resendTimer.isUninitialized() || !s.resendTimer.checkExpiration() {
 		return nil
 	}
 
@@ -776,10 +785,20 @@ func (s *sender) maybeSendSegment(seg *segment, limit int, end seqnum.Value) (se
 				}
 				// With TCP_CORK, hold back until minimum of the available
 				// send space and MSS.
-				// TODO(gvisor.dev/issue/2833): Drain the held segments after a
-				// timeout.
-				if seg.payloadSize() < s.MaxPayloadSize && s.ep.ops.GetCorkOption() {
-					return false
+				if s.ep.ops.GetCorkOption() {
+					if seg.payloadSize() < s.MaxPayloadSize {
+						if !s.startCork {
+							s.startCork = true
+							// Enable the timer for
+							// 200ms, after which
+							// the segments are drained.
+							s.corkTimer.enable(MinRTO)
+						}
+						return false
+					}
+					// Disable the TCP_CORK timer.
+					s.startCork = false
+					s.corkTimer.disable()
 				}
 			}
 		}
@@ -886,12 +905,25 @@ func (s *sender) maybeSendSegment(seg *segment, limit int, end seqnum.Value) (se
 	return true
 }
 
+// zeroProbeJunk is data sent during zero window probes. Its value is
+// irrelevant; since the sequence number has already been acknowledged it will
+// be discarded. It's only here to avoid allocating.
+var zeroProbeJunk = []byte{0}
+
 // +checklocks:s.ep.mu
 func (s *sender) sendZeroWindowProbe() {
 	s.unackZeroWindowProbes++
-	// Send a zero window probe with sequence number pointing to
-	// the last acknowledged byte.
-	s.sendEmptySegment(header.TCPFlagAck, s.SndUna-1)
+
+	// Send a zero window probe with sequence number pointing to the last
+	// acknowledged byte. Note that, like Linux, this isn't quite what RFC
+	// 9293 3.8.6.1 describes: we don't send the next byte in the stream,
+	// we re-send an ACKed byte to goad the receiver into responding.
+	pkt := stack.NewPacketBuffer(stack.PacketBufferOptions{
+		Payload: buffer.MakeWithData(zeroProbeJunk),
+	})
+	defer pkt.DecRef()
+	s.sendSegmentFromPacketBuffer(pkt, header.TCPFlagAck, s.SndUna-1)
+
 	// Rearm the timer to continue probing.
 	s.resendTimer.enable(s.RTO)
 }
@@ -1668,7 +1700,7 @@ func (s *sender) sendSegment(seg *segment) tcpip.Error {
 // flags and sequence number.
 // +checklocks:s.ep.mu
 // +checklocksalias:s.ep.rcv.ep.mu=s.ep.mu
-func (s *sender) sendSegmentFromPacketBuffer(pkt stack.PacketBufferPtr, flags header.TCPFlags, seq seqnum.Value) tcpip.Error {
+func (s *sender) sendSegmentFromPacketBuffer(pkt *stack.PacketBuffer, flags header.TCPFlags, seq seqnum.Value) tcpip.Error {
 	s.LastSendTime = s.ep.stack.Clock().NowMonotonic()
 	if seq == s.RTTMeasureSeqNum {
 		s.RTTMeasureTime = s.LastSendTime
@@ -1723,4 +1755,25 @@ func (s *sender) updateWriteNext(seg *segment) {
 		seg.IncRef()
 	}
 	s.writeNext = seg
+}
+
+// corkTimerExpired drains all the segments when TCP_CORK is enabled.
+// +checklocks:s.ep.mu
+func (s *sender) corkTimerExpired() tcpip.Error {
+	// Check if the timer actually expired or if it's a spurious wake due
+	// to a previously orphaned runtime timer.
+	if s.corkTimer.isUninitialized() || !s.corkTimer.checkExpiration() {
+		return nil
+	}
+
+	// Assign sequence number and flags to the segment.
+	seg := s.writeNext
+	if seg == nil {
+		return nil
+	}
+	seg.sequenceNumber = s.SndNxt
+	seg.flags = header.TCPFlagAck | header.TCPFlagPsh
+	// Drain all the segments.
+	s.sendData()
+	return nil
 }

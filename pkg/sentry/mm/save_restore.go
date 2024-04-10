@@ -15,9 +15,11 @@
 package mm
 
 import (
+	goContext "context"
 	"fmt"
 
 	"gvisor.dev/gvisor/pkg/context"
+	"gvisor.dev/gvisor/pkg/sentry/pgalloc"
 )
 
 // InvalidateUnsavable invokes memmap.Mappable.InvalidateUnsavable on all
@@ -35,24 +37,15 @@ func (mm *MemoryManager) InvalidateUnsavable(ctx context.Context) error {
 	return nil
 }
 
-// beforeSave is invoked by stateify.
-func (mm *MemoryManager) beforeSave() {
-	for pseg := mm.pmas.FirstSegment(); pseg.Ok(); pseg = pseg.NextSegment() {
-		if pma := pseg.ValuePtr(); pma.file != mm.mf {
-			// InvalidateUnsavable should have caused all such pmas to be
-			// invalidated.
-			panic(fmt.Sprintf("Can't save pma %#v with non-MemoryFile of type %T:\n%s", pseg.Range(), pma.file, mm))
-		}
-	}
+// afterLoad is invoked by stateify.
+func (mm *MemoryManager) afterLoad(ctx goContext.Context) {
+	mm.mf = pgalloc.MemoryFileFromContext(ctx)
+	mm.haveASIO = mm.p.SupportsAddressSpaceIO()
 }
 
 // afterLoad is invoked by stateify.
-func (mm *MemoryManager) afterLoad() {
-	mm.mf = mm.mfp.MemoryFile()
-	mm.haveASIO = mm.p.SupportsAddressSpaceIO()
-	for pseg := mm.pmas.FirstSegment(); pseg.Ok(); pseg = pseg.NextSegment() {
-		pseg.ValuePtr().file = mm.mf
-	}
+func (m *SpecialMappable) afterLoad(ctx goContext.Context) {
+	m.mf = pgalloc.MemoryFileFromContext(ctx)
 }
 
 const (
@@ -107,7 +100,7 @@ func (v *vma) saveRealPerms() int {
 	return b
 }
 
-func (v *vma) loadRealPerms(b int) {
+func (v *vma) loadRealPerms(_ goContext.Context, b int) {
 	if b&vmaRealPermsRead > 0 {
 		v.realPerms.Read = true
 	}
@@ -141,4 +134,30 @@ func (v *vma) loadRealPerms(b int) {
 	if b&vmaGrowsDown > 0 {
 		v.growsDown = true
 	}
+}
+
+func (p *pma) saveFile() string {
+	mf, ok := p.file.(*pgalloc.MemoryFile)
+	if !ok {
+		// InvalidateUnsavable should have caused all such pmas to be
+		// invalidated.
+		panic(fmt.Sprintf("Can't save pma with non-MemoryFile of type %T", p.file))
+	}
+	if !mf.IsSavable() {
+		panic(fmt.Sprintf("Can't save pma because its MemoryFile is not savable: %v", mf))
+	}
+	return mf.RestoreID()
+}
+
+func (p *pma) loadFile(ctx goContext.Context, restoreID string) {
+	if restoreID == "" {
+		p.file = pgalloc.MemoryFileFromContext(ctx)
+		return
+	}
+	mfmap := pgalloc.MemoryFileMapFromContext(ctx)
+	mf, ok := mfmap[restoreID]
+	if !ok {
+		panic(fmt.Sprintf("can't restore pma because its MemoryFile's restore ID %q was not found in CtxMemoryFileMap", restoreID))
+	}
+	p.file = mf
 }

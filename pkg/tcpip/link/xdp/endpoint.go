@@ -102,6 +102,9 @@ type Options struct {
 	// Bind is true when we're responsible for binding the AF_XDP socket to
 	// a device. When false, another process is expected to bind for us.
 	Bind bool
+
+	// GRO enables generic receive offload.
+	GRO bool
 }
 
 // New creates a new endpoint from an AF_XDP socket.
@@ -241,7 +244,7 @@ func (ep *endpoint) Wait() {
 }
 
 // AddHeader implements stack.LinkEndpoint.AddHeader.
-func (ep *endpoint) AddHeader(pkt stack.PacketBufferPtr) {
+func (ep *endpoint) AddHeader(pkt *stack.PacketBuffer) {
 	// Add ethernet header if needed.
 	eth := header.Ethernet(pkt.LinkHeader().Push(header.EthernetMinimumSize))
 	eth.Encode(&header.EthernetFields{
@@ -252,7 +255,7 @@ func (ep *endpoint) AddHeader(pkt stack.PacketBufferPtr) {
 }
 
 // ParseHeader implements stack.LinkEndpoint.ParseHeader.
-func (ep *endpoint) ParseHeader(pkt stack.PacketBufferPtr) bool {
+func (ep *endpoint) ParseHeader(pkt *stack.PacketBuffer) bool {
 	_, ok := pkt.LinkHeader().Consume(header.EthernetMinimumSize)
 	return ok
 }
@@ -301,8 +304,14 @@ func (ep *endpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error)
 		// Copy packets into UMEM frame.
 		frame := ep.control.UMEM.Get(batch[i])
 		offset := 0
-		for _, buf := range pkt.AsSlices() {
-			offset += copy(frame[offset:], buf)
+		var view *buffer.View
+		views, pktOffset := pkt.AsViewList()
+		for view = views.Front(); view != nil && pktOffset >= view.Size(); view = view.Next() {
+			pktOffset -= view.Size()
+		}
+		offset += copy(frame[offset:], view.AsSlice()[pktOffset:])
+		for view = view.Next(); view != nil; view = view.Next() {
+			offset += copy(frame[offset:], view.AsSlice())
 		}
 		ep.control.TX.Set(index+uint32(i), batch[i])
 	}
@@ -353,7 +362,8 @@ func (ep *endpoint) dispatch() (bool, tcpip.Error) {
 				// buffer.
 				descriptor := ep.control.RX.Get(rxIndex + i)
 				data := ep.control.UMEM.Get(descriptor)
-				view := buffer.NewViewWithData(data)
+				view := buffer.NewView(len(data))
+				view.Write(data)
 				views = append(views, view)
 				ep.control.UMEM.FreeFrame(descriptor.Addr)
 			}
@@ -385,7 +395,5 @@ func (ep *endpoint) dispatch() (bool, tcpip.Error) {
 			// descriptors in the RX queue.
 			ep.control.RX.Release(nReceived)
 		}
-
-		return true, nil
 	}
 }
